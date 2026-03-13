@@ -9,8 +9,11 @@ description = "A basic starter for Python packages."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-   "matplotlib",
-   "numpy",
+  "numpy",
+  "trimesh",
+  "pyvista",
+  "vtk",
+  "open3d",
 ]
 
 [project.optional-dependencies]
