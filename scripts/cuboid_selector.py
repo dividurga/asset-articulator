@@ -401,7 +401,7 @@ class CuboidSelectorApp(QMainWindow):
 
     def _build_scene(self) -> None:
         self.mesh_actor = self.plotter.add_mesh(
-            self.mesh_pv, color="lightgray", opacity=1.0,
+            self.mesh_pv, color="lightgray", opacity=.8,
             show_edges=False, name="object_mesh", pickable=False,
         )
         self.plotter.enable_surface_point_picking(

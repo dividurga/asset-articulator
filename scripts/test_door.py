@@ -22,18 +22,22 @@ from asset_articulator.geometry.clip import split_mesh_by_cuboid_clip
 from asset_articulator.geometry.cuboid import OrientedCuboid
 from asset_articulator.geometry.door import cut_cuboid_with_surface
 
-# Hardcoded cuboid from cuboid_selector
+# Hardcoded cuboid from cuboid_selector for cabinet mesh object.stl
+# CUBOID = OrientedCuboid(
+#     center=np.array([0.3333767934894833, -0.003317668775745429, 0.7440781564181818]),
+#     rotation=np.array([
+#         [0.7120260459909965, 0.0, 0.7021530529951624],
+#         [0.7021530529951624, 0.0, -0.7120260459909965],
+#         [0.0, 1.0, 0.0],
+#     ]),
+#     extents=np.array([0.23121737686787955, 0.6717011138123847, 0.0646907489331747]),
+# )
+# hardcoded cuboid from cuboid_selector for stacked washer dryer
 CUBOID = OrientedCuboid(
-    center=np.array([0.3333767934894833, -0.003317668775745429, 0.7440781564181818]),
-    rotation=np.array([
-        [0.7120260459909965, 0.0, 0.7021530529951624],
-        [0.7021530529951624, 0.0, -0.7120260459909965],
-        [0.0, 1.0, 0.0],
-    ]),
-    extents=np.array([0.23121737686787955, 0.6717011138123847, 0.0646907489331747]),
+    center=np.array([5.69383158566842, -156.44089812849145, 1562.0594939590533]),
+    rotation=np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]),
+    extents=np.array([273.6567554796125, 203.97563718619267, 54.119643312895924])
 )
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -71,7 +75,7 @@ def cuboid_wireframe(cuboid: OrientedCuboid) -> pv.PolyData:
 def main() -> None:
     # --- Load mesh ---------------------------------------------------------
     candidates = [
-        Path("data/input/object.stl"),
+        Path("data/input/Meshy_AI_Stacked Washer and Dryer_1775060331_texture.stl"),
         Path("data/input/faucet_modern.stl"),
     ]
     stl_path = next((p for p in candidates if p.exists()), None)

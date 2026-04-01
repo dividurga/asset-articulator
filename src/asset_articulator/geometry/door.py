@@ -2,37 +2,213 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 import numpy as np
 import trimesh
 
 from asset_articulator.geometry.cuboid import OrientedCuboid
 
 
-def solid_box_from_cuboid(cuboid: OrientedCuboid) -> trimesh.Trimesh:
-    """Create a watertight solid box matching the cuboid's shape and orientation."""
-    T = np.eye(4)
-    T[:3, :3] = cuboid.rotation
-    T[:3, 3] = cuboid.center
-    return trimesh.creation.box(extents=2.0 * cuboid.extents, transform=T)
+# ---------------------------------------------------------------------------
+# Clustering 
+# ---------------------------------------------------------------------------
 
+def _connected_clusters(mesh: trimesh.Trimesh, face_indices: np.ndarray) -> list[np.ndarray]:
+    """Return connected components of face_indices using trimesh face adjacency.
+
+    Merges duplicate vertices first so adjacency works on STL-style meshes
+    where each triangle has its own unshared vertex copies.
+    """
+    selected_set = set(int(fi) for fi in face_indices)
+
+    # Merge vertices so shared edges have matching indices
+    merged = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=True)
+    print(f"[door] clustering: original {len(mesh.vertices)} verts → merged {len(merged.vertices)} verts, "
+          f"face_adjacency pairs: {len(merged.face_adjacency)}")
+
+    neighbors: dict[int, list[int]] = defaultdict(list)
+    # guess who remembers bfs
+    for a, b in merged.face_adjacency:
+        a, b = int(a), int(b)
+        if a in selected_set and b in selected_set:
+            neighbors[a].append(b)
+            neighbors[b].append(a)
+
+    visited: set[int] = set()
+    clusters: list[np.ndarray] = []
+    for start in face_indices:
+        start = int(start)
+        if start in visited:
+            continue
+        cluster: list[int] = []
+        queue = [start]
+        visited.add(start)
+        while queue:
+            fi = queue.pop()
+            cluster.append(fi)
+            for nb in neighbors[fi]:
+                if nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+        clusters.append(np.array(cluster, dtype=np.int64))
+    return clusters
+
+
+# ---------------------------------------------------------------------------
+# Boundary loop extraction
+# ---------------------------------------------------------------------------
+
+def _boundary_loops(cluster_face_indices: np.ndarray, mesh_vertices: np.ndarray,
+                    mesh_faces: np.ndarray) -> list[np.ndarray]:
+    """Return ordered boundary loops (as arrays of 3-D vertex positions).
+
+    Steps
+    -----
+    1. Build a submesh from the cluster with vertices merged (process=True) so
+       that shared-edge detection works even on STL-style unshared vertices.
+    2. Find directed boundary edges: edges whose reverse (b, a) does not appear
+       among the mesh's directed half-edges.
+    3. Chain them into one or more closed loops.
+    4. Return each loop as an (N, 3) array of world-space positions.
+    """
+    # Build merged submesh so vertex indices are shared across faces
+    sub = trimesh.Trimesh(
+        vertices=mesh_vertices,
+        faces=mesh_faces[cluster_face_indices],
+        process=True,
+    )
+
+    print(f"[door]   submesh (merged): {len(sub.vertices)} verts, {len(sub.faces)} faces")
+
+    # All directed half-edges of the submesh
+    edges = sub.edges  # shape (3 * n_faces, 2)
+    edge_set = set(map(tuple, edges.tolist()))
+
+    # A half-edge (a, b) is a boundary edge if (b, a) is absent
+    boundary_directed = [(int(a), int(b)) for a, b in edges if (int(b), int(a)) not in edge_set]
+    print(f"[door]   boundary directed edges: {len(boundary_directed)}")
+
+    if not boundary_directed:
+        return []
+
+    # Build next-vertex map for each directed edge
+    next_v: dict[int, int] = {}
+    for a, b in boundary_directed:
+        next_v[a] = b
+
+    visited_starts: set[int] = set()
+    loops: list[np.ndarray] = []
+
+    for start, _ in boundary_directed:
+        if start in visited_starts:
+            continue
+        loop_idx: list[int] = []
+        cur = start
+        for _ in range(len(boundary_directed) + 1):
+            if cur in visited_starts and loop_idx:
+                break
+            visited_starts.add(cur)
+            loop_idx.append(cur)
+            cur = next_v.get(cur, -1)
+            if cur == -1 or cur == start:
+                break
+
+        if len(loop_idx) >= 3:
+            loops.append(sub.vertices[loop_idx])
+            print(f"[door]   loop: {len(loop_idx)} vertices")
+
+    return loops
+
+
+# ---------------------------------------------------------------------------
+# Extrusion
+# ---------------------------------------------------------------------------
+
+def _extrude_loops(loops: list[np.ndarray], back_origin: np.ndarray,
+                   d: np.ndarray) -> trimesh.Trimesh:
+    """Extrude each boundary loop to the cuboid back plane.
+
+    For each vertex v in the loop, the projected-back position is:
+        v_back = v - max(0, dot(v - back_origin, d)) * d
+
+    Geometry built:
+    - Side walls: one quad (two triangles) per consecutive edge pair
+    - Back cap: centroid fan of the projected loop
+
+    Winding: side walls wound so normals point outward;
+    back cap wound so normal points in -d direction.
+    """
+    all_verts: list[np.ndarray] = []
+    all_faces: list[np.ndarray] = []
+    vert_offset = 0
+
+    for loop_pts in loops:
+        n = len(loop_pts)
+        front = loop_pts  # (n, 3)
+
+        back = np.array([
+            v - max(0.0, float(np.dot(v - back_origin, d))) * d
+            for v in front
+        ])  # (n, 3)
+
+        back_center = back.mean(axis=0)
+
+        # Layout: [front_0..front_{n-1}, back_0..back_{n-1}, back_center]
+        #          indices: 0..n-1,       n..2n-1,             2n
+        verts = np.vstack([front, back, back_center.reshape(1, 3)])
+        all_verts.append(verts)
+
+        faces: list[list[int]] = []
+        o = vert_offset
+        for i in range(n):
+            j = (i + 1) % n
+            fi, fj = o + i, o + j
+            bi, bj = o + n + i, o + n + j
+            bc = o + 2 * n
+
+            # Side wall quad: (front_i → front_j → back_j → back_i)
+            # Normal points outward (away from loop interior)
+            faces.append([fi, fj, bj])
+            faces.append([fi, bj, bi])
+
+            # Back cap: fan from back_center, wound to face -d
+            faces.append([bc, bj, bi])
+
+        all_faces.append(np.array(faces, dtype=np.int64))
+        vert_offset += 2 * n + 1
+
+    if not all_verts:
+        return trimesh.Trimesh()
+
+    verts_all = np.vstack(all_verts)
+    faces_all = np.vstack(all_faces)
+    mesh = trimesh.Trimesh(vertices=verts_all, faces=faces_all, process=True)
+    trimesh.repair.fix_normals(mesh)
+    print(f"[door]   extrusion: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
+    return mesh
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def cut_cuboid_with_surface(
     surface_mesh: trimesh.Trimesh,
     cuboid: OrientedCuboid,
+    normal_threshold: float = 0.25,
 ) -> trimesh.Trimesh:
-    """Use the surface mesh to cut the solid cuboid, then join the back half with the surface.
-
-    Equivalent to the Blender workflow I was doing manually:
-      create cuboid → knife-project surface onto cuboid → keep back half → join with surface.
+    """Build door geometry via boundary-loop extrusion.
 
     Steps
     -----
-    1. Build solid box from cuboid.
-    2. Find the thin axis (door depth direction) and auto-detect which way the surface faces.
-    3. Compute the cut plane: origin = mean vertex position of the surface along the thin axis,
-       normal = thin axis direction (pointing toward front).
-    4. Slice the solid box with that plane — keep only the back half.
-    5. Concatenate back half + visual surface.
+    1. Find thin axis; auto-detect front direction from majority face normal.
+    2. Select triangles whose normal · d > normal_threshold.
+    3. Find connected clusters (via face_adjacency); pick the one whose
+       centroid is closest to the cuboid back plane.
+    4. Extract the boundary loop(s) of that cluster.
+    5. Extrude each loop to the cuboid back plane along -d.
+    6. Return full surface_mesh concatenated with the extrusion.
 
     Parameters
     ----------
@@ -40,44 +216,73 @@ def cut_cuboid_with_surface(
         The extracted visual surface (inside clip result).
     cuboid
         The cuboid used to clip the mesh.
-
-    Returns
-    -------
-    trimesh.Trimesh
-        Visual surface as front + cut-back cuboid as solid backing.
+    normal_threshold
+        Min dot product of face normal with front direction (default 0.25).
     """
-    # --- Thin axis in world space ------------------------------------------
+    # --- Thin axis and front direction ------------------------------------
     thin_axis = int(np.argmin(cuboid.extents))
     d = cuboid.rotation[:, thin_axis].copy()
-    d /= np.linalg.norm(d)
+    d = d / np.linalg.norm(d)
 
-    # Auto-detect sign: surface normals tell us which way is "front"
     face_normals = surface_mesh.face_normals
-    if (face_normals @ d).sum() < (face_normals @ (-d)).sum():
+    dot_pos = float((face_normals @ d).sum())
+    dot_neg = float((face_normals @ (-d)).sum())
+    print(f"[door] thin_axis={thin_axis}  extents={cuboid.extents}")
+    print(f"[door] d (pre-flip)={d}  sum(n·d)={dot_pos:.3f}  sum(n·-d)={dot_neg:.3f}")
+    if dot_pos < dot_neg:
         d = -d
+        print(f"[door] flipped d → {d}")
+    else:
+        print(f"[door] d kept as-is")
 
-    # --- Cut plane --------------------------------------------------------
-    # Origin: project each surface vertex onto the thin axis, use the mean depth.
-    # This gives a plane that cuts through the "average" depth of the door surface.
-    depths = surface_mesh.vertices @ d
-    cut_origin = np.mean(depths) * d  # a point on the thin axis at that depth
+    back_origin = cuboid.center - cuboid.extents[thin_axis] * d
+    print(f"[door] back_origin={back_origin}")
 
-    # --- Slice solid box --------------------------------------------------
-    solid = solid_box_from_cuboid(cuboid)
+    # --- Normal-based selection ------------------------------------------
+    dots = face_normals @ d
+    print(f"[door] face normal·d  min={dots.min():.3f}  max={dots.max():.3f}  "
+          f"mean={dots.mean():.3f}  threshold={normal_threshold}")
+    selected = np.where(dots > normal_threshold)[0]
+    print(f"[door] selected faces: {len(selected)} / {len(surface_mesh.faces)}")
 
-    # slice_mesh_plane keeps the side where dot(pt - origin, plane_normal) >= 0.
-    # We want the back half (opposite to d), so plane_normal = -d.
-    back_half = trimesh.intersections.slice_mesh_plane(
-        solid,
-        plane_normal=-d,
-        plane_origin=cut_origin,
-        cap=False,
-    )
+    if len(selected) == 0:
+        print("[door] WARNING: no faces selected — returning surface mesh unchanged")
+        return trimesh.Trimesh(
+            vertices=surface_mesh.vertices.copy(),
+            faces=surface_mesh.faces.copy(),
+            process=False,
+        )
 
-    # --- Join back half + visual surface ----------------------------------
-    combined = trimesh.util.concatenate([surface_mesh, back_half])
-    return trimesh.Trimesh(
+    # --- Cluster and pick ------------------------------------------------
+    clusters = _connected_clusters(surface_mesh, selected)
+    print(f"[door] clusters: {len(clusters)}  sizes: {sorted([len(c) for c in clusters], reverse=True)[:10]}")
+
+    best_idx = int(np.argmax([len(c) for c in clusters]))
+    best = clusters[best_idx]
+    print(f"[door] chosen cluster: idx={best_idx}  size={len(best)}")
+
+    # --- Boundary loops --------------------------------------------------
+    loops = _boundary_loops(best, surface_mesh.vertices, surface_mesh.faces)
+    print(f"[door] boundary loops found: {len(loops)}")
+
+    if not loops:
+        print("[door] WARNING: no boundary loops — returning surface mesh unchanged")
+        return trimesh.Trimesh(
+            vertices=surface_mesh.vertices.copy(),
+            faces=surface_mesh.faces.copy(),
+            process=False,
+        )
+
+    # --- Extrude and combine ---------------------------------------------
+    extrusion = _extrude_loops(loops, back_origin, d)
+
+    combined = trimesh.util.concatenate([surface_mesh, extrusion])
+    result = trimesh.Trimesh(
         vertices=combined.vertices,
         faces=combined.faces,
-        process=False,
+        process=True,
     )
+    trimesh.repair.fix_normals(result)
+    print(f"[door] final: {len(result.vertices)} verts, {len(result.faces)} faces  "
+          f"watertight={result.is_watertight}")
+    return result
