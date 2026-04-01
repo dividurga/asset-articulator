@@ -152,6 +152,7 @@ def _clip_polygon_halfspace(
     keep_less_equal: bool,
 ) -> ArrayF | None:
     """Clip a polygon against a single half-space using Sutherland-Hodgman."""
+    # this algorithm is so cool lol, I love it
     if len(poly) == 0:
         return None
 

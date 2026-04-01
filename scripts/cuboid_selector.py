@@ -11,7 +11,6 @@ import trimesh
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QGroupBox, QLabel, QSlider, QDoubleSpinBox, QPushButton, QScrollArea,
-    QCheckBox,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -19,7 +18,7 @@ from asset_articulator.assets.joints import JointLimits
 from asset_articulator.geometry.clip import split_mesh_by_cuboid_clip
 from asset_articulator.geometry.cuboid import OrientedCuboid
 from asset_articulator.geometry.edge import Edge
-from asset_articulator.geometry.cap import Cap
+from asset_articulator.geometry.door import cut_cuboid_with_surface
 from asset_articulator.io.urdf_export import export_to_urdf
 
 
@@ -210,6 +209,9 @@ class CuboidSelectorApp(QMainWindow):
         self.parent_mesh_stl: str | Path | None = None
         self.child_mesh_stl: str | Path | None = None
 
+        self._staged_parent_mesh: trimesh.Trimesh | None = None
+        self._staged_child_mesh: trimesh.Trimesh | None = None
+
         # Actors -----------------------------------------------------------
         self.mesh_actor = None
         self.plane_actor = None
@@ -358,27 +360,20 @@ class CuboidSelectorApp(QMainWindow):
         joint_lay.addWidget(limits_grp)
         pl.addWidget(joint_grp)
 
-        # ---- Capping ----
-        cap_grp = QGroupBox("Capping")
-        cap_lay = QVBoxLayout(cap_grp)
-        self._chk_cap_inside = QCheckBox("Cap inside (selection) mesh")
-        self._chk_cap_outside = QCheckBox("Cap outside (rest) mesh")
-        cap_lay.addWidget(self._chk_cap_inside)
-        cap_lay.addWidget(self._chk_cap_outside)
-        pl.addWidget(cap_grp)
-
         # ---- Actions ----
         actions_grp = QGroupBox("Actions")
         actions_lay = QVBoxLayout(actions_grp)
         btn_reset = QPushButton("Reset Face Selection")
+        btn_door  = QPushButton("Door")
         btn_save  = QPushButton("Save Split Meshes")
         btn_urdf  = QPushButton("Create URDF")
         btn_print = QPushButton("Print Cuboid Info")
         btn_reset.clicked.connect(self._reset_face)
+        btn_door.clicked.connect(self._apply_door)
         btn_save.clicked.connect(self._save_split_meshes)
         btn_urdf.clicked.connect(self._create_urdf_file)
         btn_print.clicked.connect(self._print_current_cuboid)
-        for b in (btn_reset, btn_save, btn_urdf, btn_print):
+        for b in (btn_reset, btn_door, btn_save, btn_urdf, btn_print):
             actions_lay.addWidget(b)
         pl.addWidget(actions_grp)
 
@@ -512,6 +507,8 @@ class CuboidSelectorApp(QMainWindow):
         self.current_joint_type = None
         self.current_joint_limits = None
         self.current_cuboid = None
+        self._staged_parent_mesh = None
+        self._staged_child_mesh = None
         self._lbl_joint.setText("Joint: none  |  Edge: not selected")
 
         p0, p1 = self._effective_face()
@@ -627,6 +624,8 @@ class CuboidSelectorApp(QMainWindow):
         self.current_joint_type = None
         self.current_joint_limits = None
         self.last_pick_world = None
+        self._staged_parent_mesh = None
+        self._staged_child_mesh = None
         self._lbl_joint.setText("Joint: none  |  Edge: not selected")
 
         for attr in ("face_actor", "box_actor", "edge_actor"):
@@ -731,7 +730,7 @@ class CuboidSelectorApp(QMainWindow):
         print(f"extents = np.array({self.current_cuboid.extents.tolist()})\n")
         self._set_status("Cuboid info printed to console.")
 
-    def _save_split_meshes(self) -> None:
+    def _apply_door(self) -> None:
         if self.current_cuboid is None:
             self._set_status("[warn] No cuboid defined yet.")
             return
@@ -740,48 +739,51 @@ class CuboidSelectorApp(QMainWindow):
             return
         try:
             result = split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid)
+            hinge = np.asarray(self.current_edge.p0_world, dtype=float)
+            door_mesh = cut_cuboid_with_surface(result.inside_mesh, self.current_cuboid)
+            door_mesh.vertices = door_mesh.vertices - hinge
+            parent_mesh = result.outside_mesh.copy()
+            self._staged_parent_mesh = parent_mesh
+            self._staged_child_mesh = door_mesh
+            self._set_status(
+                f"Door prepared — inside: {len(door_mesh.faces)} faces, "
+                f"outside: {len(parent_mesh.faces)} faces. Press Save to write."
+            )
+        except Exception as exc:
+            self._set_status(f"[error] door: {exc}")
+
+    def _save_split_meshes(self) -> None:
+        if self.current_cuboid is None:
+            self._set_status("[warn] No cuboid defined yet.")
+            return
+        if self.current_edge is None:
+            self._set_status("[warn] Select joint type first.")
+            return
+        try:
             out_dir = Path("data/output/split_test")
             out_dir.mkdir(parents=True, exist_ok=True)
             inside_path = out_dir / "selection_clip.stl"
             outside_path = out_dir / "rest_clip.stl"
 
             hinge = np.asarray(self.current_edge.p0_world, dtype=float)
-            parent_mesh = result.outside_mesh.copy()
-            child_mesh = result.inside_mesh.copy()
-            child_mesh.vertices = child_mesh.vertices - hinge
+
+            if self._staged_parent_mesh is not None and self._staged_child_mesh is not None:
+                parent_mesh = self._staged_parent_mesh
+                child_mesh = self._staged_child_mesh
+            else:
+                result = split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid)
+                parent_mesh = result.outside_mesh.copy()
+                child_mesh = result.inside_mesh.copy()
+                child_mesh.vertices = child_mesh.vertices - hinge
 
             parent_mesh.export(outside_path)
             child_mesh.export(inside_path)
 
-            selection_metadata = {
-                "center": self.current_cuboid.center.tolist(),
-                "rotation": self.current_cuboid.rotation.tolist(),
-                "extents": self.current_cuboid.extents.tolist(),
-            }
-            if self._chk_cap_inside.isChecked():
-                loaded = trimesh.load_mesh(inside_path, process=False)
-                capped = Cap(inside_path, selection_metadata=selection_metadata).cap_mesh(loaded)
-                capped.export(inside_path)
-                child_mesh = capped
-            if self._chk_cap_outside.isChecked():
-                loaded = trimesh.load_mesh(outside_path, process=False)
-                capped = Cap(outside_path, selection_metadata=selection_metadata).cap_mesh(loaded)
-                capped.export(outside_path)
-                parent_mesh = capped
-
             self.parent_mesh_stl = outside_path
             self.child_mesh_stl = inside_path
-            cap_note = ""
-            if self._chk_cap_inside.isChecked() or self._chk_cap_outside.isChecked():
-                parts = []
-                if self._chk_cap_inside.isChecked():
-                    parts.append("inside")
-                if self._chk_cap_outside.isChecked():
-                    parts.append("outside")
-                cap_note = f" (capped: {', '.join(parts)})"
             self._set_status(
                 f"Saved — inside: {len(child_mesh.faces)} faces, "
-                f"outside: {len(parent_mesh.faces)} faces{cap_note}."
+                f"outside: {len(parent_mesh.faces)} faces."
             )
         except Exception as exc:
             self._set_status(f"[error] save: {exc}")
@@ -836,7 +838,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/microwave2.stl")
+    window = CuboidSelectorApp("data/input/Meshy_AI_Stacked Washer and Dryer_1775060331_texture.stl")
     window.run()
     sys.exit(app.exec_())
 

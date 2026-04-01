@@ -1,4 +1,4 @@
-"""Door geometry utilities."""
+"""Drawer geometry utilities."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import numpy as np
 import trimesh
 
 from asset_articulator.geometry.cuboid import OrientedCuboid
-
+from asset_articulator.geometry.door import cut_cuboid_with_surface, solid_box_from_cuboid
 
 def solid_box_from_cuboid(cuboid: OrientedCuboid) -> trimesh.Trimesh:
     """Create a watertight solid box matching the cuboid's shape and orientation."""
@@ -22,7 +22,7 @@ def cut_cuboid_with_surface(
 ) -> trimesh.Trimesh:
     """Use the surface mesh to cut the solid cuboid, then join the back half with the surface.
 
-    Equivalent to the Blender workflow I was doing manually:
+    Equivalent to the Blender workflow:
       create cuboid → knife-project surface onto cuboid → keep back half → join with surface.
 
     Steps
