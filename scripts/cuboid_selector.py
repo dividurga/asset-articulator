@@ -11,6 +11,7 @@ import trimesh
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QGroupBox, QLabel, QSlider, QDoubleSpinBox, QPushButton, QScrollArea,
+    QCheckBox,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -18,6 +19,7 @@ from asset_articulator.assets.joints import JointLimits
 from asset_articulator.geometry.clip import split_mesh_by_cuboid_clip
 from asset_articulator.geometry.cuboid import OrientedCuboid
 from asset_articulator.geometry.edge import Edge
+from asset_articulator.geometry.cap import Cap
 from asset_articulator.io.urdf_export import export_to_urdf
 
 
@@ -355,6 +357,15 @@ class CuboidSelectorApp(QMainWindow):
         limits_lay.addWidget(self._w_upper)
         joint_lay.addWidget(limits_grp)
         pl.addWidget(joint_grp)
+
+        # ---- Capping ----
+        cap_grp = QGroupBox("Capping")
+        cap_lay = QVBoxLayout(cap_grp)
+        self._chk_cap_inside = QCheckBox("Cap inside (selection) mesh")
+        self._chk_cap_outside = QCheckBox("Cap outside (rest) mesh")
+        cap_lay.addWidget(self._chk_cap_inside)
+        cap_lay.addWidget(self._chk_cap_outside)
+        pl.addWidget(cap_grp)
 
         # ---- Actions ----
         actions_grp = QGroupBox("Actions")
@@ -741,11 +752,36 @@ class CuboidSelectorApp(QMainWindow):
 
             parent_mesh.export(outside_path)
             child_mesh.export(inside_path)
+
+            selection_metadata = {
+                "center": self.current_cuboid.center.tolist(),
+                "rotation": self.current_cuboid.rotation.tolist(),
+                "extents": self.current_cuboid.extents.tolist(),
+            }
+            if self._chk_cap_inside.isChecked():
+                loaded = trimesh.load_mesh(inside_path, process=False)
+                capped = Cap(inside_path, selection_metadata=selection_metadata).cap_mesh(loaded)
+                capped.export(inside_path)
+                child_mesh = capped
+            if self._chk_cap_outside.isChecked():
+                loaded = trimesh.load_mesh(outside_path, process=False)
+                capped = Cap(outside_path, selection_metadata=selection_metadata).cap_mesh(loaded)
+                capped.export(outside_path)
+                parent_mesh = capped
+
             self.parent_mesh_stl = outside_path
             self.child_mesh_stl = inside_path
+            cap_note = ""
+            if self._chk_cap_inside.isChecked() or self._chk_cap_outside.isChecked():
+                parts = []
+                if self._chk_cap_inside.isChecked():
+                    parts.append("inside")
+                if self._chk_cap_outside.isChecked():
+                    parts.append("outside")
+                cap_note = f" (capped: {', '.join(parts)})"
             self._set_status(
-                f"Saved — inside: {len(result.inside_mesh.faces)} faces, "
-                f"outside: {len(result.outside_mesh.faces)} faces."
+                f"Saved — inside: {len(child_mesh.faces)} faces, "
+                f"outside: {len(parent_mesh.faces)} faces{cap_note}."
             )
         except Exception as exc:
             self._set_status(f"[error] save: {exc}")
@@ -800,7 +836,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/faucet_modern.stl")
+    window = CuboidSelectorApp("data/input/microwave2.stl")
     window.run()
     sys.exit(app.exec_())
 

@@ -62,7 +62,7 @@ def mesh_to_pv(mesh: trimesh.Trimesh) -> pv.PolyData:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    stl_path = Path("data/output/split_test/selection_clip.stl")
+    stl_path = Path("data/output/split_test/rest_clip.stl")
     output_stl = Path("data/output/split_test/selection_clip_capped.stl")
     if not stl_path.exists():
         raise FileNotFoundError(

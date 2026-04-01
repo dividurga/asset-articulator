@@ -12,6 +12,29 @@ class Cap:
         self.mesh_path = mesh_path
         self.selection_metadata = selection_metadata
 
+    def _drop_tiny_components(self, mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+        """Remove tiny disconnected sliver components that destabilize boundary detection."""
+        if len(mesh.faces) == 0:
+            return mesh
+
+        components = list(mesh.split(only_watertight=False))
+        if len(components) <= 1:
+            return mesh
+
+        face_counts = np.asarray([len(comp.faces) for comp in components], dtype=np.int64)
+        largest = int(np.max(face_counts))
+        min_faces_to_keep = max(4, int(np.ceil(largest * 1e-5)))
+        keep = [comp for comp, n_faces in zip(components, face_counts) if int(n_faces) >= min_faces_to_keep]
+
+        if not keep:
+            return mesh
+        if len(keep) == len(components):
+            return mesh
+
+        cleaned = trimesh.util.concatenate(keep)
+        cleaned.remove_unreferenced_vertices()
+        return cleaned
+
     def _clean_mesh_for_boundary(self, mesh: trimesh.Trimesh) -> trimesh.Trimesh:
         """Return a copy with welded vertices so shared edges are counted correctly."""
         cleaned = mesh.copy()
@@ -23,6 +46,7 @@ class Cap:
         if hasattr(cleaned, "remove_degenerate_faces"):
             getattr(cleaned, "remove_degenerate_faces")()
         cleaned.remove_unreferenced_vertices()
+        cleaned = self._drop_tiny_components(cleaned)
         return cleaned
 
     def boundary_edges(self, mesh: trimesh.Trimesh) -> np.ndarray:
