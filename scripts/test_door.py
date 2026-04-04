@@ -95,7 +95,11 @@ def main() -> None:
     print(f"  Outside (rest)         : {len(outside_mesh.faces)} faces")
 
     # --- Cut cuboid with surface + join -----------------------------------
-    door_mesh, _ = cut_cuboid_with_surface(inside_mesh, CUBOID)
+    print(f"  Clip loops             : {len(result.clip_loops)}")
+    door_mesh, _ = cut_cuboid_with_surface(
+        inside_mesh, CUBOID,
+        clip_loops=result.clip_loops or None,
+    )
     print(f"\nDoor mesh  : {len(door_mesh.faces)} faces")
 
     # --- Export ------------------------------------------------------------

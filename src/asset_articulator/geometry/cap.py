@@ -205,14 +205,41 @@ class Cap:
         """Lift 2D plane coordinates back to 3D points using plane basis."""
         return centroid + np.outer(vertices_2d[:, 0], u) + np.outer(vertices_2d[:, 1], v)
 
-    def cap_mesh(self, mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-        """Return a new mesh with the boundary edges capped."""
-        cleaned = self._clean_mesh_for_boundary(mesh)
-        loop = self.select_boundary_loop(cleaned)
-        if loop is None or len(loop) < 3:
-            return cleaned
+    def cap_mesh(
+        self,
+        mesh: trimesh.Trimesh,
+        loop_vertices: np.ndarray | None = None,
+    ) -> trimesh.Trimesh:
+        """Return a new mesh with the boundary edges capped.
 
-        loop_points = cleaned.vertices[loop]
+        Parameters
+        ----------
+        mesh
+            The open mesh to cap.
+        loop_vertices
+            Optional (N, 3) array of world-space vertices forming the cap loop,
+            in order.  When provided, the heuristic loop selection is skipped
+            entirely — use ``MeshClipResult.clip_loops[i]`` here.
+        """
+        cleaned = self._clean_mesh_for_boundary(mesh)
+
+        if loop_vertices is not None:
+            loop_points = np.asarray(loop_vertices, dtype=float)
+            if len(loop_points) < 3:
+                return cleaned
+            # Snap each loop position to the nearest vertex in the cleaned mesh.
+            loop_mesh_indices = np.array(
+                [int(np.argmin(np.linalg.norm(cleaned.vertices - pt, axis=1)))
+                 for pt in loop_points],
+                dtype=np.int64,
+            )
+        else:
+            loop = self.select_boundary_loop(cleaned)
+            if loop is None or len(loop) < 3:
+                return cleaned
+            loop_mesh_indices = loop
+            loop_points = cleaned.vertices[loop_mesh_indices]
+
         centroid, u, v = self._plane_basis_from_points(loop_points)
         loop_2d = np.column_stack(
             [
@@ -238,7 +265,7 @@ class Cap:
             distances = np.linalg.norm(loop_2d - v2d, axis=1)
             nearest = int(np.argmin(distances))
             if float(distances[nearest]) <= tol:
-                cap_vertex_to_mesh_index.append(int(loop[nearest]))
+                cap_vertex_to_mesh_index.append(int(loop_mesh_indices[nearest]))
             else:
                 cap_vertex_to_mesh_index.append(len(merged_vertices))
                 merged_vertices = np.vstack([merged_vertices, v3d])

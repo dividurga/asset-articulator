@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from xml.dom import minidom
 import xml.etree.ElementTree as ET
@@ -8,122 +9,134 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 from asset_articulator.assets.joints import JointLimits
-from asset_articulator.geometry.cuboid import OrientedCuboid
 from asset_articulator.geometry.edge import Edge
+
+
+@dataclass
+class ArticulationSpec:
+    """One articulated child link for URDF export.
+
+    child_mesh_stl
+        Path to the child STL file, already expressed in the child's local
+        frame (i.e. vertices shifted by -hinge_origin before saving).
+    edge
+        The selected joint edge in world coordinates.
+    joint_type
+        ``"revolute"`` or ``"prismatic"``.
+    joint_limits
+        Lower/upper limits (radians for revolute, metres for prismatic).
+    link_name
+        Name used in the URDF for this link/joint pair (e.g. ``"door_0"``).
+    """
+
+    child_mesh_stl: str | Path
+    edge: Edge
+    joint_type: str
+    joint_limits: JointLimits
+    link_name: str = "door"
 
 
 def export_to_urdf(
     urdf_path: str | Path,
     parent_mesh_stl: str | Path,
-    child_mesh_stl: str | Path,
-    cuboid: OrientedCuboid,
-    edge_of_interest: Edge,
-    joint_type: str,
-    joint_limits: JointLimits,
+    articulations: list[ArticulationSpec],
 ) -> None:
-    """Export the selected articulation as a URDF file.
+    """Export one or more articulated joints as a URDF file.
 
     Frame convention
     ----------------
-    - Parent link frame == world frame used when exporting the parent STL.
-    - Child link frame == joint origin, chosen as edge_of_interest.p0_world.
-    - Child STL is expected to already be exported in this child-local frame.
-      In other words, the child mesh vertices should have been shifted by
-      -edge_of_interest.p0_world before writing child_mesh_stl.
+    - Base link frame == world frame used when exporting the parent STL.
+    - Each child link frame == its joint origin (edge.p0_world).
+    - Each child STL is expected to already be in that local frame
+      (vertices shifted by -edge.p0_world before writing).
 
-    Notes
-    -----
-    - This exporter does not currently use `cuboid`, but it remains in the
-      signature to keep the API stable.
-    - Only visual geometry is exported for now. Collision and inertial tags
-      can be added later once the frame conventions are settled.
+    URDF structure
+    --------------
+    ::
+
+        <robot>
+          <link name="base"> ... </link>
+          <link name="door_0"> ... </link>
+          <joint name="joint_0" type="revolute">
+            <parent link="base"/>
+            <child  link="door_0"/>
+            ...
+          </joint>
+          <link name="door_1"> ... </link>
+          <joint name="joint_1" ...> ... </joint>
+          ...
+        </robot>
     """
-    del cuboid
+    if not articulations:
+        raise ValueError("At least one ArticulationSpec is required.")
 
-    if joint_type not in {"revolute", "prismatic"}:
-        raise ValueError(f"Unsupported joint type: {joint_type}")
+    for spec in articulations:
+        if spec.joint_type not in {"revolute", "prismatic"}:
+            raise ValueError(f"Unsupported joint type: {spec.joint_type!r}")
 
     urdf_path = Path(urdf_path)
     urdf_path.parent.mkdir(parents=True, exist_ok=True)
     urdf_dir = urdf_path.parent.resolve()
 
     parent_mesh_stl = Path(parent_mesh_stl).resolve()
-    child_mesh_stl = Path(child_mesh_stl).resolve()
-
     if not parent_mesh_stl.exists():
         raise FileNotFoundError(f"Parent mesh STL not found: {parent_mesh_stl}")
-    if not child_mesh_stl.exists():
-        raise FileNotFoundError(f"Child mesh STL not found: {child_mesh_stl}")
-
     parent_mesh_rel = Path(os.path.relpath(parent_mesh_stl, start=urdf_dir)).as_posix()
-    child_mesh_rel = Path(os.path.relpath(child_mesh_stl, start=urdf_dir)).as_posix()
-
-    joint_origin = np.asarray(edge_of_interest.p0_world, dtype=float)
-    axis = np.asarray(
-        edge_of_interest.p1_world - edge_of_interest.p0_world,
-        dtype=float,
-    )
-
-    axis_norm = float(np.linalg.norm(axis))
-    if axis_norm < 1e-6:
-        raise ValueError("Edge of interest is too short to define a valid joint axis.")
-    axis = axis / axis_norm
 
     robot = ET.Element("robot", name="articulated_object")
 
-    # ------------------------------------------------------------------
-    # Parent link
-    # Parent link frame == world frame.
-    # Parent mesh is expected to already be expressed in this frame.
-    # ------------------------------------------------------------------
-    parent_link = ET.SubElement(robot, "link", name="parent")
+    # Base link
+    base_link = ET.SubElement(robot, "link", name="base")
+    base_visual = ET.SubElement(base_link, "visual")
+    ET.SubElement(base_visual, "origin", xyz="0 0 0", rpy="0 0 0")
+    base_geo = ET.SubElement(base_visual, "geometry")
+    ET.SubElement(base_geo, "mesh", filename=parent_mesh_rel)
 
-    parent_visual = ET.SubElement(parent_link, "visual")
-    ET.SubElement(parent_visual, "origin", xyz="0 0 0", rpy="0 0 0")
-    parent_geometry = ET.SubElement(parent_visual, "geometry")
-    ET.SubElement(parent_geometry, "mesh", filename=parent_mesh_rel)
+    for i, spec in enumerate(articulations):
+        child_stl = Path(spec.child_mesh_stl).resolve()
+        if not child_stl.exists():
+            raise FileNotFoundError(f"Child mesh STL not found: {child_stl}")
+        child_rel = Path(os.path.relpath(child_stl, start=urdf_dir)).as_posix()
 
-    # ------------------------------------------------------------------
-    # Child link
-    # Child link frame == joint origin.
-    # Child mesh is expected to already be expressed in this local frame.
-    # ------------------------------------------------------------------
-    child_link = ET.SubElement(robot, "link", name="child")
+        # Ensure unique link/joint names
+        link_name = spec.link_name if spec.link_name != "door" else f"door_{i}"
+        joint_name = f"joint_{i}"
 
-    child_visual = ET.SubElement(child_link, "visual")
-    ET.SubElement(child_visual, "origin", xyz="0 0 0", rpy="0 0 0")
-    child_geometry = ET.SubElement(child_visual, "geometry")
-    ET.SubElement(child_geometry, "mesh", filename=child_mesh_rel)
+        joint_origin = np.asarray(spec.edge.p0_world, dtype=float)
+        axis = np.asarray(spec.edge.p1_world - spec.edge.p0_world, dtype=float)
+        axis_norm = float(np.linalg.norm(axis))
+        if axis_norm < 1e-6:
+            raise ValueError(f"Articulation {i}: edge is too short to define a valid axis.")
+        axis = axis / axis_norm
 
-    # TODO: add inertial and collision tags later
+        # Child link
+        child_link = ET.SubElement(robot, "link", name=link_name)
+        child_visual = ET.SubElement(child_link, "visual")
+        ET.SubElement(child_visual, "origin", xyz="0 0 0", rpy="0 0 0")
+        child_geo = ET.SubElement(child_visual, "geometry")
+        ET.SubElement(child_geo, "mesh", filename=child_rel)
 
-    # ------------------------------------------------------------------
-    # Joint
-    # Joint origin is expressed in the parent frame (world).
-    # Joint axis is expressed in the joint/parent frame.
-    # ------------------------------------------------------------------
-    joint = ET.SubElement(robot, "joint", name="joint1", type=joint_type)
-    ET.SubElement(joint, "parent", link="parent")
-    ET.SubElement(joint, "child", link="child")
-    ET.SubElement(joint, "origin", xyz=_format_xyz(joint_origin), rpy="0 0 0")
-    ET.SubElement(joint, "axis", xyz=_format_xyz(axis))
-    ET.SubElement(
-        joint,
-        "limit",
-        lower=str(joint_limits.lower),
-        upper=str(joint_limits.upper),
-        effort="100.0",   # TODO: allow user to specify effort
-        velocity="1.0",   # TODO: allow user to specify velocity
-    )
+        # Joint
+        joint = ET.SubElement(robot, "joint", name=joint_name, type=spec.joint_type)
+        ET.SubElement(joint, "parent", link="base")
+        ET.SubElement(joint, "child", link=link_name)
+        ET.SubElement(joint, "origin", xyz=_fmt(joint_origin), rpy="0 0 0")
+        ET.SubElement(joint, "axis", xyz=_fmt(axis))
+        ET.SubElement(
+            joint, "limit",
+            lower=str(spec.joint_limits.lower),
+            upper=str(spec.joint_limits.upper),
+            effort="100.0",
+            velocity="1.0",
+        )
 
-    xml_str = _prettify_xml(robot)
-    urdf_path.write_text(xml_str, encoding="utf-8")
+    urdf_path.write_text(_prettify(robot), encoding="utf-8")
 
 
-def _format_xyz(v: np.ndarray) -> str:
+def _fmt(v: np.ndarray) -> str:
     return f"{v[0]:.8f} {v[1]:.8f} {v[2]:.8f}"
 
 
-def _prettify_xml(elem: ET.Element) -> str:
+def _prettify(elem: ET.Element) -> str:
     rough = ET.tostring(elem, encoding="utf-8")
     return minidom.parseString(rough).toprettyxml(indent="  ")

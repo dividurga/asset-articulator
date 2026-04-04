@@ -20,6 +20,7 @@ _EPS = 1e-9
 class MeshClipResult:
     inside_mesh: trimesh.Trimesh
     outside_mesh: trimesh.Trimesh
+    clip_loops: list[ArrayF]  # directed boundary loops lying on the cuboid surface
 
 
 def split_mesh_by_cuboid_clip(
@@ -103,10 +104,100 @@ def split_mesh_by_cuboid_clip(
         else np.zeros((0, 3, 3), dtype=float)
     )
 
+    clip_loops = _extract_clip_loops(inside_mesh, cuboid)
+
     return MeshClipResult(
         inside_mesh=inside_mesh,
         outside_mesh=outside_mesh,
+        clip_loops=clip_loops,
     )
+
+
+def _extract_clip_loops(
+    inside_mesh: trimesh.Trimesh,
+    cuboid: OrientedCuboid,
+    tol_factor: float = 1e-5,
+) -> list[ArrayF]:
+    """Extract directed boundary loops that lie on the cuboid cut planes.
+
+    After Sutherland-Hodgman clipping the boundary edges of *inside_mesh* that
+    sit on a cuboid face are exactly the edges introduced by the cut.  We merge
+    vertices, identify those edges, and chain them into one or more directed
+    loops.
+
+    Parameters
+    ----------
+    inside_mesh
+        The clipped-inside result (process=False, unshared vertices).
+    cuboid
+        The cuboid used to produce the clip.
+    tol_factor
+        Fraction of the largest cuboid extent used as plane-proximity tolerance.
+
+    Returns
+    -------
+    list of (N, 3) float arrays, each an ordered directed loop in world space.
+    """
+    if len(inside_mesh.faces) == 0:
+        return []
+
+    # Merge vertices so that shared edges are represented as matching indices.
+    merged = inside_mesh.copy()
+    merged.merge_vertices()
+    merged.remove_unreferenced_vertices()
+
+    if len(merged.faces) == 0:
+        return []
+
+    # Classify each vertex: is it on a cuboid face plane?
+    verts_local = cuboid.world_to_local(merged.vertices)  # (V, 3)
+    ex, ey, ez = cuboid.extents
+    tol = tol_factor * max(ex, ey, ez)
+
+    on_face: ArrayF = (
+        (np.abs(np.abs(verts_local[:, 0]) - ex) < tol)
+        | (np.abs(np.abs(verts_local[:, 1]) - ey) < tol)
+        | (np.abs(np.abs(verts_local[:, 2]) - ez) < tol)
+    )  # (V,) bool
+
+    # Directed boundary half-edges: (a→b) whose reverse (b→a) is absent.
+    edges = merged.edges  # (3*F, 2) directed half-edges
+    edge_set = set(map(tuple, edges.tolist()))
+    clip_directed: list[tuple[int, int]] = [
+        (int(a), int(b))
+        for a, b in edges
+        if (int(b), int(a)) not in edge_set
+        and bool(on_face[a])
+        and bool(on_face[b])
+    ]
+
+    if not clip_directed:
+        return []
+
+    # Build next-vertex map (assumes locally manifold boundary).
+    next_v: dict[int, int] = {a: b for a, b in clip_directed}
+
+    visited: set[int] = set()
+    loops: list[ArrayF] = []
+
+    for start, _ in clip_directed:
+        if start in visited:
+            continue
+        loop_idx: list[int] = []
+        cur = start
+        for _ in range(len(clip_directed) + 1):
+            if cur in visited and loop_idx:
+                break
+            visited.add(cur)
+            loop_idx.append(cur)
+            cur = next_v.get(cur, -1)
+            if cur == -1 or cur == start:
+                break
+
+        if len(loop_idx) >= 3:
+            loops.append(merged.vertices[loop_idx].copy())
+
+    return loops
 
 
 def _cuboid_planes(extents: ArrayF) -> list[tuple[int, float, bool]]:

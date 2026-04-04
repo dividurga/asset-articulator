@@ -1,26 +1,41 @@
 <?xml version="1.0" ?>
 <robot name="articulated_object">
-  <link name="parent">
+  <link name="base">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="../split_test/rest_clip.stl"/>
+        <mesh filename="base.stl"/>
       </geometry>
     </visual>
   </link>
-  <link name="child">
+  <link name="door_0">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="../split_test/selection_clip.stl"/>
+        <mesh filename="door_0.stl"/>
       </geometry>
     </visual>
   </link>
-  <joint name="joint1" type="revolute">
-    <parent link="parent"/>
-    <child link="child"/>
-    <origin xyz="-34.87687583 -23.09956412 22.05954968" rpy="0 0 0"/>
-    <axis xyz="1.00000000 0.00000000 0.00000000"/>
-    <limit lower="0.0" upper="0.6981317007977318" effort="100.0" velocity="1.0"/>
+  <joint name="joint_0" type="revolute">
+    <parent link="base"/>
+    <child link="door_0"/>
+    <origin xyz="0.44930416 0.20419391 0.06589369" rpy="0 0 0"/>
+    <axis xyz="0.00000000 0.00000000 1.00000000"/>
+    <limit lower="0.0" upper="1.5707963267948966" effort="100.0" velocity="1.0"/>
+  </joint>
+  <link name="door_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="door_1.stl"/>
+      </geometry>
+    </visual>
+  </link>
+  <joint name="joint_1" type="revolute">
+    <parent link="base"/>
+    <child link="door_1"/>
+    <origin xyz="-0.20118648 -0.45544330 1.40710630" rpy="0 0 0"/>
+    <axis xyz="0.00000000 0.00000000 -1.00000000"/>
+    <limit lower="0.0" upper="1.5707963267948966" effort="100.0" velocity="1.0"/>
   </joint>
 </robot>

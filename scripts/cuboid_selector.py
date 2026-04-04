@@ -19,7 +19,7 @@ from asset_articulator.geometry.clip import split_mesh_by_cuboid_clip
 from asset_articulator.geometry.cuboid import OrientedCuboid
 from asset_articulator.geometry.edge import Edge
 from asset_articulator.geometry.door import cut_cuboid_with_surface
-from asset_articulator.io.urdf_export import export_to_urdf
+from asset_articulator.io.urdf_export import ArticulationSpec, export_to_urdf
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +154,18 @@ class FaceSelection:
     p1_uv: np.ndarray | None = None
 
 
+@dataclass
+class ArticulationEntry:
+    """One completed door/slider selection ready for URDF export."""
+    cuboid: OrientedCuboid
+    edge: Edge
+    joint_type: str
+    joint_limits: JointLimits
+    door_mesh: trimesh.Trimesh   # in hinge-local frame (shifted by -hinge_origin)
+    hinge_origin: np.ndarray     # world coords of joint origin
+    box_actor: object = None     # pyvista actor for this door's wireframe
+
+
 # ---------------------------------------------------------------------------
 # Main application
 # ---------------------------------------------------------------------------
@@ -206,10 +218,9 @@ class CuboidSelectorApp(QMainWindow):
         self.current_joint_limits: JointLimits | None = None
         self.last_pick_world: np.ndarray | None = None
 
-        self.parent_mesh_stl: str | Path | None = None
-        self.child_mesh_stl: str | Path | None = None
+        # Multi-door articulation list
+        self._articulations: list[ArticulationEntry] = []
 
-        self._staged_parent_mesh: trimesh.Trimesh | None = None
         self._staged_child_mesh: trimesh.Trimesh | None = None
 
         # Actors -----------------------------------------------------------
@@ -363,18 +374,22 @@ class CuboidSelectorApp(QMainWindow):
         # ---- Actions ----
         actions_grp = QGroupBox("Actions")
         actions_lay = QVBoxLayout(actions_grp)
-        btn_reset = QPushButton("Reset Face Selection")
-        btn_door  = QPushButton("Door")
-        btn_save  = QPushButton("Save Split Meshes")
-        btn_urdf  = QPushButton("Create URDF")
-        btn_print = QPushButton("Print Cuboid Info")
+        btn_reset     = QPushButton("Reset Face Selection")
+        btn_door      = QPushButton("Preview Door")
+        btn_add_door  = QPushButton("Add Door")
+        btn_clear     = QPushButton("Clear All Doors")
+        btn_urdf      = QPushButton("Export URDF")
+        btn_print     = QPushButton("Print Cuboid Info")
         btn_reset.clicked.connect(self._reset_face)
         btn_door.clicked.connect(self._apply_door)
-        btn_save.clicked.connect(self._save_split_meshes)
+        btn_add_door.clicked.connect(self._add_door)
+        btn_clear.clicked.connect(self._clear_doors)
         btn_urdf.clicked.connect(self._create_urdf_file)
         btn_print.clicked.connect(self._print_current_cuboid)
-        for b in (btn_reset, btn_door, btn_save, btn_urdf, btn_print):
+        self._lbl_doors = QLabel("Doors queued: 0")
+        for b in (btn_reset, btn_door, btn_add_door, btn_clear, btn_urdf, btn_print):
             actions_lay.addWidget(b)
+        actions_lay.addWidget(self._lbl_doors)
         pl.addWidget(actions_grp)
 
         # Status label
@@ -507,7 +522,6 @@ class CuboidSelectorApp(QMainWindow):
         self.current_joint_type = None
         self.current_joint_limits = None
         self.current_cuboid = None
-        self._staged_parent_mesh = None
         self._staged_child_mesh = None
         self._lbl_joint.setText("Joint: none  |  Edge: not selected")
 
@@ -624,7 +638,6 @@ class CuboidSelectorApp(QMainWindow):
         self.current_joint_type = None
         self.current_joint_limits = None
         self.last_pick_world = None
-        self._staged_parent_mesh = None
         self._staged_child_mesh = None
         self._lbl_joint.setText("Joint: none  |  Edge: not selected")
 
@@ -740,78 +753,124 @@ class CuboidSelectorApp(QMainWindow):
         try:
             result = split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid)
             hinge = np.asarray(self.current_edge.p0_world, dtype=float)
-            door_mesh, _ = cut_cuboid_with_surface(result.inside_mesh, self.current_cuboid)
+            door_mesh, _ = cut_cuboid_with_surface(
+                result.inside_mesh, self.current_cuboid,
+                clip_loops=result.clip_loops or None,
+            )
             door_mesh.vertices = door_mesh.vertices - hinge
-            parent_mesh = result.outside_mesh.copy()
-            self._staged_parent_mesh = parent_mesh
             self._staged_child_mesh = door_mesh
             self._set_status(
-                f"Door prepared — inside: {len(door_mesh.faces)} faces, "
-                f"outside: {len(parent_mesh.faces)} faces. Press Save to write."
+                f"Door preview — {len(door_mesh.faces)} faces. "
+                f"Click 'Add Door' to queue it."
             )
         except Exception as exc:
             self._set_status(f"[error] door: {exc}")
 
-    def _save_split_meshes(self) -> None:
+    def _add_door(self) -> None:
         if self.current_cuboid is None:
             self._set_status("[warn] No cuboid defined yet.")
             return
-        if self.current_edge is None:
-            self._set_status("[warn] Select joint type first.")
+        if self.current_edge is None or self.current_joint_type is None or self.current_joint_limits is None:
+            self._set_status("[warn] Select joint type and limits first.")
             return
-        try:
-            out_dir = Path("data/output/split_test")
-            out_dir.mkdir(parents=True, exist_ok=True)
-            inside_path = out_dir / "selection_clip.stl"
-            outside_path = out_dir / "rest_clip.stl"
 
-            hinge = np.asarray(self.current_edge.p0_world, dtype=float)
+        # Run door computation if not already previewed
+        if self._staged_child_mesh is None:
+            self._apply_door()
+            if self._staged_child_mesh is None:
+                return  # _apply_door already set error status
 
-            if self._staged_parent_mesh is not None and self._staged_child_mesh is not None:
-                parent_mesh = self._staged_parent_mesh
-                child_mesh = self._staged_child_mesh
-            else:
-                result = split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid)
-                parent_mesh = result.outside_mesh.copy()
-                child_mesh = result.inside_mesh.copy()
-                child_mesh.vertices = child_mesh.vertices - hinge
+        # Draw a persistent green wireframe for this door's cuboid
+        half_u, half_v, half_n = self.current_cuboid.extents
+        corners_local = np.array([
+            [-half_u, -half_v, -half_n], [ half_u, -half_v, -half_n],
+            [ half_u,  half_v, -half_n], [-half_u,  half_v, -half_n],
+            [-half_u, -half_v,  half_n], [ half_u, -half_v,  half_n],
+            [ half_u,  half_v,  half_n], [-half_u,  half_v,  half_n],
+        ], dtype=float)
+        corners_world = self.current_cuboid.local_to_world(corners_local)
+        edge_pairs = [
+            (0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)
+        ]
+        lines: list[int] = []
+        for a, b in edge_pairs:
+            lines.extend([2, a, b])
+        wire = pv.PolyData()
+        wire.points = corners_world
+        wire.lines = np.array(lines, dtype=np.int32)
+        actor = self.plotter.add_mesh(
+            wire, color="lime", line_width=2,
+            name=f"door_box_{len(self._articulations)}",
+        )
 
-            parent_mesh.export(outside_path)
-            child_mesh.export(inside_path)
+        entry = ArticulationEntry(
+            cuboid=self.current_cuboid,
+            edge=self.current_edge,
+            joint_type=self.current_joint_type,
+            joint_limits=self.current_joint_limits,
+            door_mesh=self._staged_child_mesh,
+            hinge_origin=np.asarray(self.current_edge.p0_world, dtype=float),
+            box_actor=actor,
+        )
+        self._articulations.append(entry)
+        self._lbl_doors.setText(f"Doors queued: {len(self._articulations)}")
+        self._set_status(
+            f"Door {len(self._articulations) - 1} added "
+            f"({len(self._staged_child_mesh.faces)} faces). Reset face to add another."
+        )
+        # Clear current selection so user can start a new one
+        self._reset_face()
 
-            self.parent_mesh_stl = outside_path
-            self.child_mesh_stl = inside_path
-            self._set_status(
-                f"Saved — inside: {len(child_mesh.faces)} faces, "
-                f"outside: {len(parent_mesh.faces)} faces."
-            )
-        except Exception as exc:
-            self._set_status(f"[error] save: {exc}")
+    def _clear_doors(self) -> None:
+        for entry in self._articulations:
+            if entry.box_actor is not None:
+                self.plotter.remove_actor(entry.box_actor)
+        self._articulations.clear()
+        self._lbl_doors.setText("Doors queued: 0")
+        self.plotter.render()
+        self._set_status("All queued doors cleared.")
 
     def _create_urdf_file(self) -> None:
-        if self.current_cuboid is None:
-            self._set_status("[warn] No cuboid defined yet."); return
-        if self.current_edge is None or self.current_joint_type is None:
-            self._set_status("[warn] Select joint type first."); return
-        if self.current_joint_limits is None:
-            self._set_status("[warn] Joint limits required."); return
-        if self.parent_mesh_stl is None or self.child_mesh_stl is None:
-            self._set_status("[warn] Save split meshes first."); return
+        if not self._articulations:
+            self._set_status("[warn] No doors queued. Add at least one door first.")
+            return
 
         export_dir = Path("data/output/urdf_test")
         export_dir.mkdir(parents=True, exist_ok=True)
-        urdf_path = export_dir / "name.urdf"
+
         try:
+            # Compute remainder by sequentially removing each door from the original mesh
+            remainder = self.mesh_tm.copy()
+            for entry in self._articulations:
+                clip_result = split_mesh_by_cuboid_clip(remainder, entry.cuboid)
+                remainder = clip_result.outside_mesh
+
+            base_stl = export_dir / "base.stl"
+            remainder.export(base_stl)
+
+            # Save each door mesh and build ArticulationSpec list
+            specs: list[ArticulationSpec] = []
+            for i, entry in enumerate(self._articulations):
+                door_stl = export_dir / f"door_{i}.stl"
+                entry.door_mesh.export(door_stl)
+                specs.append(ArticulationSpec(
+                    child_mesh_stl=door_stl,
+                    edge=entry.edge,
+                    joint_type=entry.joint_type,
+                    joint_limits=entry.joint_limits,
+                    link_name=f"door_{i}",
+                ))
+
+            urdf_path = export_dir / "name.urdf"
             export_to_urdf(
                 urdf_path=urdf_path,
-                parent_mesh_stl=self.parent_mesh_stl,
-                child_mesh_stl=self.child_mesh_stl,
-                cuboid=self.current_cuboid,
-                edge_of_interest=self.current_edge,
-                joint_type=self.current_joint_type,
-                joint_limits=self.current_joint_limits,
+                parent_mesh_stl=base_stl,
+                articulations=specs,
             )
-            self._set_status(f"URDF saved to {urdf_path}")
+            self._set_status(
+                f"URDF saved to {urdf_path}  "
+                f"({len(specs)} door(s), base + {len(specs)} STL(s))"
+            )
         except Exception as exc:
             self._set_status(f"[error] URDF export: {exc}")
 
@@ -838,7 +897,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/stove.stl")
+    window = CuboidSelectorApp("data/input/object.stl")
     window.run()
     sys.exit(app.exec_())
 

@@ -220,18 +220,25 @@ def cut_cuboid_with_surface(
     surface_mesh: trimesh.Trimesh,
     cuboid: OrientedCuboid,
     normal_threshold: float = 0.25,
+    clip_loops: list[np.ndarray] | None = None,
 ) -> tuple[trimesh.Trimesh, np.ndarray]:
     """Build door geometry via boundary-loop extrusion.
 
-    Steps
+    Steps (heuristic path, when clip_loops is None)
     -----
     1. Find thin axis; auto-detect front direction from majority face normal.
     2. Select triangles whose normal · d > normal_threshold.
-    3. Find connected clusters (via face_adjacency); pick the one whose
-       centroid is closest to the cuboid back plane.
+    3. Find connected clusters (via face_adjacency); pick the largest.
     4. Extract the boundary loop(s) of that cluster.
     5. Extrude each loop to the cuboid back plane along -d.
     6. Return full surface_mesh concatenated with the extrusion.
+
+    When clip_loops is provided (preferred)
+    ----------------------------------------
+    Steps 2-4 are skipped entirely.  The supplied loops (from
+    ``MeshClipResult.clip_loops``) are the directed boundary edges that the
+    clipping operation produced on the cuboid face planes, which are exactly
+    the perimeter of the cut opening.
 
     Parameters
     ----------
@@ -241,12 +248,16 @@ def cut_cuboid_with_surface(
         The cuboid used to clip the mesh.
     normal_threshold
         Min dot product of face normal with front direction (default 0.25).
+        Ignored when clip_loops is provided.
+    clip_loops
+        Pre-computed directed boundary loops from ``MeshClipResult.clip_loops``.
+        Each element is an (N, 3) world-space vertex array.
     """
-    # --- Thin axis and front direction ------------------------------------
+    # --- Thin axis and front direction (always needed for extrusion) ------
     thin_axis = int(np.argmin(cuboid.extents))
     d = cuboid.rotation[:, thin_axis].copy()
     d = d / np.linalg.norm(d)
-    
+
     face_normals = surface_mesh.face_normals
     dot_pos = float((face_normals @ d).sum())
     dot_neg = float((face_normals @ (-d)).sum())
@@ -261,35 +272,40 @@ def cut_cuboid_with_surface(
     back_origin = cuboid.center - cuboid.extents[thin_axis] * d
     print(f"[door] back_origin={back_origin}")
 
-    # --- Normal-based selection ------------------------------------------
-    dots = face_normals @ d
-    print(f"[door] face normal·d  min={dots.min():.3f}  max={dots.max():.3f}  "
-          f"mean={dots.mean():.3f}  threshold={normal_threshold}")
-    selected = np.where(dots > normal_threshold)[0]
-    print(f"[door] selected faces: {len(selected)} / {len(surface_mesh.faces)}")
+    # --- Loop source: clip-tracked or heuristic --------------------------
+    if clip_loops is not None:
+        loops = clip_loops
+        print(f"[door] using {len(loops)} pre-computed clip loop(s)")
+    else:
+        # --- Normal-based selection --------------------------------------
+        dots = face_normals @ d
+        print(f"[door] face normal·d  min={dots.min():.3f}  max={dots.max():.3f}  "
+              f"mean={dots.mean():.3f}  threshold={normal_threshold}")
+        selected = np.where(dots > normal_threshold)[0]
+        print(f"[door] selected faces: {len(selected)} / {len(surface_mesh.faces)}")
 
-    if len(selected) == 0:
-        print("[door] WARNING: no faces selected — returning surface mesh unchanged")
-        return trimesh.Trimesh(
-            vertices=surface_mesh.vertices.copy(),
-            faces=surface_mesh.faces.copy(),
-            process=False,
-        ), np.empty((0, 2, 3), dtype=float)
+        if len(selected) == 0:
+            print("[door] WARNING: no faces selected — returning surface mesh unchanged")
+            return trimesh.Trimesh(
+                vertices=surface_mesh.vertices.copy(),
+                faces=surface_mesh.faces.copy(),
+                process=False,
+            ), np.empty((0, 2, 3), dtype=float)
 
-    # --- Cluster and pick ------------------------------------------------
-    clusters = _connected_clusters(surface_mesh, selected)
-    print(f"[door] clusters: {len(clusters)}  sizes: {sorted([len(c) for c in clusters], reverse=True)[:10]}")
+        # --- Cluster and pick --------------------------------------------
+        clusters = _connected_clusters(surface_mesh, selected)
+        print(f"[door] clusters: {len(clusters)}  sizes: {sorted([len(c) for c in clusters], reverse=True)[:10]}")
 
-    best_idx = int(np.argmax([len(c) for c in clusters]))
-    best = clusters[best_idx]
-    print(f"[door] chosen cluster: idx={best_idx}  size={len(best)}")
+        best_idx = int(np.argmax([len(c) for c in clusters]))
+        best = clusters[best_idx]
+        print(f"[door] chosen cluster: idx={best_idx}  size={len(best)}")
 
-    # --- Boundary loops --------------------------------------------------
-    loops = _boundary_loops(best, surface_mesh.vertices, surface_mesh.faces)
-    print(f"[door] boundary loops found: {len(loops)}")
+        # --- Boundary loops ----------------------------------------------
+        loops = _boundary_loops(best, surface_mesh.vertices, surface_mesh.faces)
+        print(f"[door] boundary loops found: {len(loops)}")
 
     if not loops:
-        print("[door] WARNING: no boundary loops — returning surface mesh unchanged")
+        print("[door] WARNING: no loops — returning surface mesh unchanged")
         return trimesh.Trimesh(
             vertices=surface_mesh.vertices.copy(),
             faces=surface_mesh.faces.copy(),
