@@ -19,8 +19,8 @@
   <joint name="joint1" type="revolute">
     <parent link="parent"/>
     <child link="child"/>
-    <origin xyz="261.48991930 -102.32125482 1357.70861164" rpy="0 0 0"/>
-    <axis xyz="0.00000000 0.00000000 1.00000000"/>
-    <limit lower="0.0" upper="0.3490658503988659" effort="100.0" velocity="1.0"/>
+    <origin xyz="-34.87687583 -23.09956412 22.05954968" rpy="0 0 0"/>
+    <axis xyz="1.00000000 0.00000000 0.00000000"/>
+    <limit lower="0.0" upper="0.6981317007977318" effort="100.0" velocity="1.0"/>
   </joint>
 </robot>

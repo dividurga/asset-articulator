@@ -126,7 +126,7 @@ def _boundary_loops(cluster_face_indices: np.ndarray, mesh_vertices: np.ndarray,
 # ---------------------------------------------------------------------------
 
 def _extrude_loops(loops: list[np.ndarray], back_origin: np.ndarray,
-                   d: np.ndarray) -> trimesh.Trimesh:
+                   d: np.ndarray) -> tuple[trimesh.Trimesh, np.ndarray]:
     """Extrude each boundary loop to the cuboid back plane.
 
     For each vertex v in the loop, the projected-back position is:
@@ -138,10 +138,22 @@ def _extrude_loops(loops: list[np.ndarray], back_origin: np.ndarray,
 
     Winding: side walls wound so normals point outward;
     back cap wound so normal points in -d direction.
+
+    Returns
+    -------
+    mesh
+        The extruded trimesh geometry.
+    back_perimeter_edges
+        (n, 2, 3) array of the back-panel perimeter edges for the largest
+        loop, where each row is [v_start, v_end] in world-space coordinates.
     """
     all_verts: list[np.ndarray] = []
     all_faces: list[np.ndarray] = []
     vert_offset = 0
+
+    # Track the back vertices of the largest loop for perimeter edges
+    chosen_back: np.ndarray | None = None
+    largest_n = 0
 
     for loop_pts in loops:
         n = len(loop_pts)
@@ -151,6 +163,10 @@ def _extrude_loops(loops: list[np.ndarray], back_origin: np.ndarray,
             v - max(0.0, float(np.dot(v - back_origin, d))) * d
             for v in front
         ])  # (n, 3)
+
+        if n > largest_n:
+            largest_n = n
+            chosen_back = back
 
         back_center = back.mean(axis=0)
 
@@ -179,14 +195,21 @@ def _extrude_loops(loops: list[np.ndarray], back_origin: np.ndarray,
         vert_offset += 2 * n + 1
 
     if not all_verts:
-        return trimesh.Trimesh()
+        return trimesh.Trimesh(), np.empty((0, 2, 3), dtype=float)
 
     verts_all = np.vstack(all_verts)
     faces_all = np.vstack(all_faces)
     mesh = trimesh.Trimesh(vertices=verts_all, faces=faces_all, process=True)
     trimesh.repair.fix_normals(mesh)
-    print(f"[door]   extrusion: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
-    return mesh
+
+    # Back perimeter edges of the chosen (largest) loop: back[i] → back[(i+1)%n]
+    assert chosen_back is not None
+    n = len(chosen_back)
+    back_perimeter_edges = np.stack([chosen_back, chosen_back[np.arange(1, n + 1) % n]], axis=1)  # (n, 2, 3)
+
+    print(f"[door]   extrusion: {len(mesh.vertices)} verts, {len(mesh.faces)} faces  "
+          f"back_perimeter_edges={len(back_perimeter_edges)}")
+    return mesh, back_perimeter_edges
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +220,7 @@ def cut_cuboid_with_surface(
     surface_mesh: trimesh.Trimesh,
     cuboid: OrientedCuboid,
     normal_threshold: float = 0.25,
-) -> trimesh.Trimesh:
+) -> tuple[trimesh.Trimesh, np.ndarray]:
     """Build door geometry via boundary-loop extrusion.
 
     Steps
@@ -223,7 +246,7 @@ def cut_cuboid_with_surface(
     thin_axis = int(np.argmin(cuboid.extents))
     d = cuboid.rotation[:, thin_axis].copy()
     d = d / np.linalg.norm(d)
-
+    
     face_normals = surface_mesh.face_normals
     dot_pos = float((face_normals @ d).sum())
     dot_neg = float((face_normals @ (-d)).sum())
@@ -251,7 +274,7 @@ def cut_cuboid_with_surface(
             vertices=surface_mesh.vertices.copy(),
             faces=surface_mesh.faces.copy(),
             process=False,
-        )
+        ), np.empty((0, 2, 3), dtype=float)
 
     # --- Cluster and pick ------------------------------------------------
     clusters = _connected_clusters(surface_mesh, selected)
@@ -271,10 +294,10 @@ def cut_cuboid_with_surface(
             vertices=surface_mesh.vertices.copy(),
             faces=surface_mesh.faces.copy(),
             process=False,
-        )
+        ), np.empty((0, 2, 3), dtype=float)
 
     # --- Extrude and combine ---------------------------------------------
-    extrusion = _extrude_loops(loops, back_origin, d)
+    extrusion, back_perimeter_edges = _extrude_loops(loops, back_origin, d)
 
     combined = trimesh.util.concatenate([surface_mesh, extrusion])
     result = trimesh.Trimesh(
@@ -285,4 +308,4 @@ def cut_cuboid_with_surface(
     trimesh.repair.fix_normals(result)
     print(f"[door] final: {len(result.vertices)} verts, {len(result.faces)} faces  "
           f"watertight={result.is_watertight}")
-    return result
+    return result, back_perimeter_edges

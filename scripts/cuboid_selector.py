@@ -401,7 +401,7 @@ class CuboidSelectorApp(QMainWindow):
 
     def _build_scene(self) -> None:
         self.mesh_actor = self.plotter.add_mesh(
-            self.mesh_pv, color="lightgray", opacity=.8,
+            self.mesh_pv, color="lightgray", opacity=1.0,
             show_edges=False, name="object_mesh", pickable=False,
         )
         self.plotter.enable_surface_point_picking(
@@ -740,7 +740,7 @@ class CuboidSelectorApp(QMainWindow):
         try:
             result = split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid)
             hinge = np.asarray(self.current_edge.p0_world, dtype=float)
-            door_mesh = cut_cuboid_with_surface(result.inside_mesh, self.current_cuboid)
+            door_mesh, _ = cut_cuboid_with_surface(result.inside_mesh, self.current_cuboid)
             door_mesh.vertices = door_mesh.vertices - hinge
             parent_mesh = result.outside_mesh.copy()
             self._staged_parent_mesh = parent_mesh
@@ -838,7 +838,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/Meshy_AI_Stacked Washer and Dryer_1775060331_texture.stl")
+    window = CuboidSelectorApp("data/input/stove.stl")
     window.run()
     sys.exit(app.exec_())
 
