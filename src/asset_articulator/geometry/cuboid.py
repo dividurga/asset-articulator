@@ -41,3 +41,17 @@ class OrientedCuboid:
         """Transform local points of shape (N, 3) into world coordinates."""
         points_local = np.asarray(points_local, dtype=float)
         return points_local @ self.rotation.T + self.center
+
+    def contains(self, points_world: ArrayF, tol: float = 1e-6) -> npt.NDArray[np.bool_]:
+        """Return boolean mask of which points lie strictly inside this cuboid.
+
+        Parameters
+        ----------
+        points_world
+            Shape (N, 3) world-space points.
+        tol
+            Points within ``tol`` of a face plane are considered outside
+            (so that points exactly on the boundary don't count).
+        """
+        local = self.world_to_local(np.asarray(points_world, dtype=float))
+        return np.all(np.abs(local) < self.extents - tol, axis=1)

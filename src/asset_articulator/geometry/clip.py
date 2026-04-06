@@ -26,6 +26,7 @@ class MeshClipResult:
 def split_mesh_by_cuboid_clip(
     mesh: trimesh.Trimesh,
     cuboid: OrientedCuboid,
+    existing_cuboids: list[OrientedCuboid] | None = None,
 ) -> MeshClipResult:
     """Precisely split a triangle mesh by an oriented cuboid using plane clipping.
 
@@ -39,18 +40,41 @@ def split_mesh_by_cuboid_clip(
         Input triangular mesh.
     cuboid
         Oriented cuboid in world coordinates.
+    existing_cuboids
+        Previously used cuboids.  If any triangle centroid lies inside both
+        ``cuboid`` and one of these, a ``ValueError`` is raised indicating
+        the overlap so that the user can reposition the selection.
 
     Returns
     -------
     MeshClipResult
         inside_mesh: geometry inside the cuboid
         outside_mesh: complementary geometry outside the cuboid
+
+    Raises
+    ------
+    ValueError
+        If ``existing_cuboids`` is provided and the new cuboid overlaps a
+        previous one (i.e. at least one triangle centroid is inside both).
     """
     if not isinstance(mesh, trimesh.Trimesh):
         raise TypeError(f"Expected trimesh.Trimesh, got {type(mesh)}")
 
     if len(mesh.faces) == 0:
         raise ValueError("Input mesh has no faces.")
+
+    if existing_cuboids:
+        centroids = mesh.triangles_center  # (F, 3)
+        new_inside = cuboid.contains(centroids)
+        for i, other in enumerate(existing_cuboids):
+            overlap = new_inside & other.contains(centroids)
+            if overlap.any():
+                n = int(overlap.sum())
+                raise ValueError(
+                    f"New cuboid overlaps existing cuboid {i}: "
+                    f"{n} triangle centroid(s) lie inside both. "
+                    f"Reposition the selection so the cuboids do not intersect."
+                )
 
     triangles_world = mesh.triangles
     triangles_local = cuboid.world_to_local(
@@ -104,6 +128,9 @@ def split_mesh_by_cuboid_clip(
         else np.zeros((0, 3, 3), dtype=float)
     )
 
+    inside_mesh = _drop_small_components(inside_mesh)
+    outside_mesh = _drop_small_components(outside_mesh)
+
     clip_loops = _extract_clip_loops(inside_mesh, cuboid)
 
     return MeshClipResult(
@@ -111,6 +138,44 @@ def split_mesh_by_cuboid_clip(
         outside_mesh=outside_mesh,
         clip_loops=clip_loops,
     )
+
+
+def _drop_small_components(
+    mesh: trimesh.Trimesh,
+    min_ratio: float = 0.005,
+    min_faces: int = 4,
+) -> trimesh.Trimesh:
+    """Remove disconnected components that are much smaller than the largest one.
+
+    A component is kept if its face count >= max(min_faces, min_ratio * largest).
+    With the default min_ratio=0.5%, a component must be at least 0.5% of the
+    largest component to survive — this kills slivers from near-coincident cuts
+    while preserving intentionally small geometry.
+    """
+    if len(mesh.faces) == 0:
+        return mesh
+
+    # merge vertices so adjacency works on unshared-vertex (STL-style) meshes
+    merged = mesh.copy()
+    merged.merge_vertices()
+    components = merged.split(only_watertight=False)
+
+    if len(components) <= 1:
+        return mesh  # nothing to drop
+
+    face_counts = np.array([len(c.faces) for c in components], dtype=np.int64)
+    threshold = max(min_faces, int(np.ceil(face_counts.max() * min_ratio)))
+    keep = [c for c, n in zip(components, face_counts) if n >= threshold]
+
+    if len(keep) == len(components):
+        return mesh  # nothing was small enough to drop
+
+    if not keep:
+        return mesh  # safety: never return empty when input was non-empty
+
+    combined = trimesh.util.concatenate(keep)
+    combined.remove_unreferenced_vertices()
+    return combined
 
 
 def _extract_clip_loops(

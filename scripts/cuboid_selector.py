@@ -11,6 +11,7 @@ import trimesh
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QGroupBox, QLabel, QSlider, QDoubleSpinBox, QPushButton, QScrollArea,
+    QCheckBox,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -192,13 +193,14 @@ class CuboidSelectorApp(QMainWindow):
         # Plane state (cumulative angles + absolute offset along normal) ---
         self.yaw_deg = 0.0
         self.pitch_deg = 0.0
+        self.roll_deg = 0.0
         self.plane_offset = 0.0
         self.plane_origin_base = np.array([
             self.scene_center[0],
             self.bounds_max[1] - 0.02 * self.scene_extents[1],
             self.scene_center[2],
         ], dtype=float)
-        self.plane_u, self.plane_v = self._compute_plane_axes(0.0, 0.0)
+        self.plane_u, self.plane_v = self._compute_plane_axes(0.0, 0.0, 0.0)
         self.plane_origin = self.plane_origin_base.copy()
         self.plane_size_u = max(1e-3, 1.5 * float(self.scene_extents[0]))
         self.plane_size_v = max(1e-3, 1.5 * float(self.scene_extents[2]))
@@ -241,7 +243,7 @@ class CuboidSelectorApp(QMainWindow):
     def plane_n(self) -> np.ndarray:
         return normalize(np.cross(self.plane_u, self.plane_v))
 
-    def _compute_plane_axes(self, yaw_deg: float, pitch_deg: float):
+    def _compute_plane_axes(self, yaw_deg: float, pitch_deg: float, roll_deg: float):
         """Recompute plane_u / plane_v from scratch (no drift)."""
         base_u = np.array([1.0, 0.0, 0.0])
         base_v = np.array([0.0, 0.0, 1.0])
@@ -255,6 +257,12 @@ class CuboidSelectorApp(QMainWindow):
         u_final = normalize(R_pitch @ u_yaw)
         v_final = R_pitch @ v_yaw
         v_final = normalize(v_final - np.dot(v_final, u_final) * u_final)
+
+        if abs(roll_deg) > 1e-12:
+            n_final = normalize(np.cross(u_final, v_final))
+            R_roll = rotation_matrix(n_final, np.deg2rad(roll_deg))
+            u_final = normalize(R_roll @ u_final)
+            v_final = normalize(R_roll @ v_final)
 
         return u_final, v_final
 
@@ -316,6 +324,11 @@ class CuboidSelectorApp(QMainWindow):
         )
         for w in (self._w_plane_pos, self._w_yaw, self._w_pitch):
             plane_lay.addWidget(w)
+
+        self._w_roll = SliderSpinBox(
+            "Roll ° (about plane normal)", -180.0, 180.0, 0.0, decimals=1
+        )
+        plane_lay.addWidget(self._w_roll)
 
         view_row = QHBoxLayout()
         btn_vf = QPushButton("View Front")
@@ -386,9 +399,11 @@ class CuboidSelectorApp(QMainWindow):
         btn_clear.clicked.connect(self._clear_doors)
         btn_urdf.clicked.connect(self._create_urdf_file)
         btn_print.clicked.connect(self._print_current_cuboid)
+        self._chk_slice_only = QCheckBox("Slice only (export single combined mesh)")
         self._lbl_doors = QLabel("Doors queued: 0")
         for b in (btn_reset, btn_door, btn_add_door, btn_clear, btn_urdf, btn_print):
             actions_lay.addWidget(b)
+        actions_lay.addWidget(self._chk_slice_only)
         actions_lay.addWidget(self._lbl_doors)
         pl.addWidget(actions_grp)
 
@@ -406,6 +421,7 @@ class CuboidSelectorApp(QMainWindow):
         self._w_plane_pos.valueChanged.connect(self._on_plane_pos_changed)
         self._w_yaw.valueChanged.connect(self._on_rotation_changed)
         self._w_pitch.valueChanged.connect(self._on_rotation_changed)
+        self._w_roll.valueChanged.connect(self._on_rotation_changed)
         self._w_depth.valueChanged.connect(self._on_depth_changed)
         self._w_face_u.valueChanged.connect(self._on_face_offset_changed)
         self._w_face_v.valueChanged.connect(self._on_face_offset_changed)
@@ -439,7 +455,8 @@ class CuboidSelectorApp(QMainWindow):
     def _on_rotation_changed(self, _=None) -> None:
         self.yaw_deg = self._w_yaw.value()
         self.pitch_deg = self._w_pitch.value()
-        self.plane_u, self.plane_v = self._compute_plane_axes(self.yaw_deg, self.pitch_deg)
+        self.roll_deg = self._w_roll.value()
+        self.plane_u, self.plane_v = self._compute_plane_axes(self.yaw_deg, self.pitch_deg, self.roll_deg)
         self.plane_origin = self.plane_origin_base + self.plane_offset * self.plane_n
         self._update_plane()
 
@@ -774,6 +791,14 @@ class CuboidSelectorApp(QMainWindow):
             self._set_status("[warn] Select joint type and limits first.")
             return
 
+        # Check for overlap with already-queued cuboids
+        existing = [e.cuboid for e in self._articulations]
+        try:
+            split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid, existing_cuboids=existing)
+        except ValueError as exc:
+            self._set_status(f"[error] {exc}")
+            return
+
         # Run door computation if not already previewed
         if self._staged_child_mesh is None:
             self._apply_door()
@@ -845,6 +870,22 @@ class CuboidSelectorApp(QMainWindow):
                 clip_result = split_mesh_by_cuboid_clip(remainder, entry.cuboid)
                 remainder = clip_result.outside_mesh
 
+            if self._chk_slice_only.isChecked():
+                # Export base + doors as separate objects in one GLB file
+                scene = trimesh.Scene()
+                scene.add_geometry(remainder, node_name="base", geom_name="base")
+                for i, entry in enumerate(self._articulations):
+                    m = entry.door_mesh.copy()
+                    m.vertices = m.vertices + entry.hinge_origin
+                    scene.add_geometry(m, node_name=f"door_{i}", geom_name=f"door_{i}")
+                out_path = export_dir / "sliced_combined.glb"
+                scene.export(out_path)
+                self._set_status(
+                    f"Sliced scene saved to {out_path}  "
+                    f"({len(self._articulations)} door(s) + base, separate objects)"
+                )
+                return
+
             base_stl = export_dir / "base.stl"
             remainder.export(base_stl)
 
@@ -897,7 +938,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/object.stl")
+    window = CuboidSelectorApp("data/lab_reconstruction/stove.stl")
     window.run()
     sys.exit(app.exec_())
 
