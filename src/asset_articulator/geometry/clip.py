@@ -8,6 +8,7 @@ import numpy.typing as npt
 import trimesh
 
 from asset_articulator.geometry.cuboid import OrientedCuboid
+from asset_articulator.geometry.cylinder import OrientedCylinder
 
 
 ArrayF = npt.NDArray[np.float64]
@@ -423,3 +424,194 @@ def _triangles_to_mesh(triangles: ArrayF) -> trimesh.Trimesh:
     faces = np.arange(3 * n_tri, dtype=int).reshape(n_tri, 3)
 
     return trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+
+# ---------------------------------------------------------------------------
+# Cylinder clipping
+# ---------------------------------------------------------------------------
+
+def _clip_polygon_by_halfplane(
+    poly: ArrayF,
+    normal: ArrayF,
+    bound: float,
+    keep_inside: bool,
+) -> ArrayF | None:
+    """Sutherland-Hodgman clip against dot(normal, p) <= bound (keep_inside=True)."""
+    output: list[ArrayF] = []
+    prev = poly[-1]
+    prev_d = float(np.dot(normal, prev))
+    prev_ok = (prev_d <= bound + _EPS) if keep_inside else (prev_d >= bound - _EPS)
+
+    for curr in poly:
+        curr_d = float(np.dot(normal, curr))
+        curr_ok = (curr_d <= bound + _EPS) if keep_inside else (curr_d >= bound - _EPS)
+
+        if curr_ok:
+            if not prev_ok:
+                denom = curr_d - prev_d
+                t = float(np.clip((bound - prev_d) / denom, 0.0, 1.0)) if abs(denom) > _EPS else 0.0
+                output.append(prev + t * (curr - prev))
+            output.append(curr.copy())
+        elif prev_ok:
+            denom = curr_d - prev_d
+            t = float(np.clip((bound - prev_d) / denom, 0.0, 1.0)) if abs(denom) > _EPS else 0.0
+            output.append(prev + t * (curr - prev))
+
+        prev, prev_d, prev_ok = curr, curr_d, curr_ok
+
+    if len(output) < 3:
+        return None
+    return _deduplicate_polygon_vertices(np.asarray(output, dtype=float))
+
+
+def split_mesh_by_cylinder_clip(
+    mesh: trimesh.Trimesh,
+    cylinder: OrientedCylinder,
+    N: int = 64,
+) -> MeshClipResult:
+    """Split a triangle mesh by an oriented cylinder.
+
+    The cylinder is approximated as an N-gon prism (default N=64) in the
+    cylinder's local frame.  Two flat cap planes handle the axial bounds;
+    N radial half-planes approximate the curved wall.
+
+    Parameters
+    ----------
+    mesh
+        Input triangular mesh.
+    cylinder
+        Oriented cylinder in world coordinates.
+    N
+        Number of sides for the radial polygon approximation (default 64).
+        At N=64 the max radial error is ~0.12% of the radius.
+
+    Returns
+    -------
+    MeshClipResult
+        inside_mesh / outside_mesh / clip_loops (on the flat cap planes).
+    """
+    if not isinstance(mesh, trimesh.Trimesh):
+        raise TypeError(f"Expected trimesh.Trimesh, got {type(mesh)}")
+    if len(mesh.faces) == 0:
+        raise ValueError("Input mesh has no faces.")
+
+    triangles_world = mesh.triangles
+    triangles_local = cylinder.world_to_local(
+        triangles_world.reshape(-1, 3)
+    ).reshape(-1, 3, 3)
+
+    h = cylinder.half_height
+    r = cylinder.radius
+    angles = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False)
+
+    # Flat cap planes (z ≤ h  and  -z ≤ h) + N circumscribed radial planes
+    planes: list[tuple[ArrayF, float]] = [
+        (np.array([0.0, 0.0,  1.0]), h),
+        (np.array([0.0, 0.0, -1.0]), h),
+    ]
+    for a in angles:
+        planes.append((np.array([float(np.cos(a)), float(np.sin(a)), 0.0]), r))
+
+    inside_tris: list[ArrayF] = []
+    outside_tris: list[ArrayF] = []
+
+    for tri_local in triangles_local:
+        inside_polys: list[ArrayF] = [tri_local]
+        outside_polys: list[ArrayF] = []
+
+        for plane_n, bound in planes:
+            next_inside: list[ArrayF] = []
+            for poly in inside_polys:
+                kept = _clip_polygon_by_halfplane(poly, plane_n, bound, True)
+                rejected = _clip_polygon_by_halfplane(poly, plane_n, bound, False)
+                if kept is not None and len(kept) >= 3:
+                    next_inside.append(kept)
+                if rejected is not None and len(rejected) >= 3:
+                    outside_polys.append(rejected)
+            inside_polys = next_inside
+            if not inside_polys:
+                break
+
+        for poly in inside_polys:
+            inside_tris.extend(_triangulate_convex_polygon(poly))
+        for poly in outside_polys:
+            outside_tris.extend(_triangulate_convex_polygon(poly))
+
+    def _to_world(tris: list[ArrayF]) -> ArrayF:
+        if not tris:
+            return np.zeros((0, 3, 3), dtype=float)
+        return cylinder.local_to_world(np.asarray(tris).reshape(-1, 3)).reshape(-1, 3, 3)
+
+    inside_mesh = _triangles_to_mesh(_to_world(inside_tris))
+    outside_mesh = _triangles_to_mesh(_to_world(outside_tris))
+    inside_mesh = _drop_small_components(inside_mesh)
+    outside_mesh = _drop_small_components(outside_mesh)
+
+    clip_loops = _extract_cylinder_clip_loops(inside_mesh, cylinder)
+
+    return MeshClipResult(
+        inside_mesh=inside_mesh,
+        outside_mesh=outside_mesh,
+        clip_loops=clip_loops,
+    )
+
+
+def _extract_cylinder_clip_loops(
+    inside_mesh: trimesh.Trimesh,
+    cylinder: OrientedCylinder,
+    tol_factor: float = 1e-4,
+) -> list[ArrayF]:
+    """Extract directed boundary loops lying on the cylinder's flat cap planes.
+
+    Only edges where both endpoints sit at |z| ≈ half_height (in cylinder local
+    frame) are considered cut edges.
+    """
+    if len(inside_mesh.faces) == 0:
+        return []
+
+    merged = inside_mesh.copy()
+    merged.merge_vertices()
+    merged.remove_unreferenced_vertices()
+
+    if len(merged.faces) == 0:
+        return []
+
+    verts_local = cylinder.world_to_local(merged.vertices)
+    tol = tol_factor * cylinder.half_height
+
+    on_cap: ArrayF = np.abs(np.abs(verts_local[:, 2]) - cylinder.half_height) < tol
+
+    edges = merged.edges
+    edge_set = set(map(tuple, edges.tolist()))
+    clip_directed: list[tuple[int, int]] = [
+        (int(a), int(b))
+        for a, b in edges
+        if (int(b), int(a)) not in edge_set
+        and bool(on_cap[a])
+        and bool(on_cap[b])
+    ]
+
+    if not clip_directed:
+        return []
+
+    next_v: dict[int, int] = {a: b for a, b in clip_directed}
+    visited: set[int] = set()
+    loops: list[ArrayF] = []
+
+    for start, _ in clip_directed:
+        if start in visited:
+            continue
+        loop_idx: list[int] = []
+        cur = start
+        for _ in range(len(clip_directed) + 1):
+            if cur in visited and loop_idx:
+                break
+            visited.add(cur)
+            loop_idx.append(cur)
+            cur = next_v.get(cur, -1)
+            if cur == -1 or cur == start:
+                break
+        if len(loop_idx) >= 3:
+            loops.append(merged.vertices[loop_idx].copy())
+
+    return loops

@@ -71,7 +71,7 @@ def export_to_urdf(
         raise ValueError("At least one ArticulationSpec is required.")
 
     for spec in articulations:
-        if spec.joint_type not in {"revolute", "prismatic"}:
+        if spec.joint_type not in {"revolute", "prismatic", "continuous"}:
             raise ValueError(f"Unsupported joint type: {spec.joint_type!r}")
 
     urdf_path = Path(urdf_path)
@@ -122,13 +122,14 @@ def export_to_urdf(
         ET.SubElement(joint, "child", link=link_name)
         ET.SubElement(joint, "origin", xyz=_fmt(joint_origin), rpy="0 0 0")
         ET.SubElement(joint, "axis", xyz=_fmt(axis))
-        ET.SubElement(
-            joint, "limit",
-            lower=str(spec.joint_limits.lower),
-            upper=str(spec.joint_limits.upper),
-            effort="100.0",
-            velocity="1.0",
-        )
+        if spec.joint_type != "continuous":
+            ET.SubElement(
+                joint, "limit",
+                lower=str(spec.joint_limits.lower),
+                upper=str(spec.joint_limits.upper),
+                effort="100.0",
+                velocity="1.0",
+            )
 
     urdf_path.write_text(_prettify(robot), encoding="utf-8")
 

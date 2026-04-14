@@ -11,15 +11,16 @@ import trimesh
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QGroupBox, QLabel, QSlider, QDoubleSpinBox, QPushButton, QScrollArea,
-    QCheckBox,
+    QCheckBox, QRadioButton, QButtonGroup,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
 from asset_articulator.assets.joints import JointLimits
-from asset_articulator.geometry.clip import split_mesh_by_cuboid_clip
+from asset_articulator.geometry.clip import split_mesh_by_cuboid_clip, split_mesh_by_cylinder_clip
 from asset_articulator.geometry.cuboid import OrientedCuboid
+from asset_articulator.geometry.cylinder import OrientedCylinder
 from asset_articulator.geometry.edge import Edge
-from asset_articulator.geometry.door import cut_cuboid_with_surface
+from asset_articulator.geometry.door import cut_cuboid_with_surface, cut_cylinder_with_surface
 from asset_articulator.io.urdf_export import ArticulationSpec, export_to_urdf
 
 
@@ -158,12 +159,13 @@ class FaceSelection:
 @dataclass
 class ArticulationEntry:
     """One completed door/slider selection ready for URDF export."""
-    cuboid: OrientedCuboid
     edge: Edge
     joint_type: str
     joint_limits: JointLimits
     door_mesh: trimesh.Trimesh   # in hinge-local frame (shifted by -hinge_origin)
     hinge_origin: np.ndarray     # world coords of joint origin
+    cuboid: OrientedCuboid | None = None
+    cylinder: OrientedCylinder | None = None
     box_actor: object = None     # pyvista actor for this door's wireframe
 
 
@@ -212,9 +214,16 @@ class CuboidSelectorApp(QMainWindow):
         self.face = FaceSelection()
         self.face_offset_u = 0.0
         self.face_offset_v = 0.0
+        self._face_center_uv: np.ndarray | None = None
+
+        # Selection mode ---------------------------------------------------
+        self._selection_mode: str = "cuboid"  # "cuboid" or "cylinder"
+        self._cyl_center_uv: np.ndarray | None = None
+        self._cyl_radius: float = 0.0
 
         # Joint state ------------------------------------------------------
         self.current_cuboid: OrientedCuboid | None = None
+        self.current_cylinder: OrientedCylinder | None = None
         self.current_edge: Edge | None = None
         self.current_joint_type: str | None = None
         self.current_joint_limits: JointLimits | None = None
@@ -309,6 +318,19 @@ class CuboidSelectorApp(QMainWindow):
 
         d = self.scene_diag
 
+        # ---- Selection Mode ----
+        mode_grp = QGroupBox("Selection Mode")
+        mode_lay = QHBoxLayout(mode_grp)
+        self._rb_cuboid = QRadioButton("Cuboid")
+        self._rb_cylinder = QRadioButton("Cylinder")
+        self._rb_cuboid.setChecked(True)
+        self._btn_grp_mode = QButtonGroup()
+        self._btn_grp_mode.addButton(self._rb_cuboid)
+        self._btn_grp_mode.addButton(self._rb_cylinder)
+        mode_lay.addWidget(self._rb_cuboid)
+        mode_lay.addWidget(self._rb_cylinder)
+        pl.addWidget(mode_grp)
+
         # ---- Plane ----
         plane_grp = QGroupBox("Construction Plane")
         plane_lay = QVBoxLayout(plane_grp)
@@ -345,9 +367,11 @@ class CuboidSelectorApp(QMainWindow):
         cuboid_lay = QVBoxLayout(cuboid_grp)
 
         self._w_depth = SliderSpinBox("Depth", 1e-3, 3 * d, self.depth, decimals=4)
+        self._w_size_u = SliderSpinBox("Width (U extent)", 1e-4, 3 * d, 0.1 * d, decimals=4)
+        self._w_size_v = SliderSpinBox("Height (V extent)", 1e-4, 3 * d, 0.1 * d, decimals=4)
         self._w_face_u = SliderSpinBox("Face offset U", -2 * d, 2 * d, 0.0, decimals=4)
         self._w_face_v = SliderSpinBox("Face offset V", -2 * d, 2 * d, 0.0, decimals=4)
-        for w in (self._w_depth, self._w_face_u, self._w_face_v):
+        for w in (self._w_depth, self._w_size_u, self._w_size_v, self._w_face_u, self._w_face_v):
             cuboid_lay.addWidget(w)
 
         btn_flip = QPushButton("Flip Extrusion Direction")
@@ -360,19 +384,25 @@ class CuboidSelectorApp(QMainWindow):
         joint_lay = QVBoxLayout(joint_grp)
 
         jbtn_row = QHBoxLayout()
-        btn_hinge = QPushButton("Select Hinge (Revolute)")
-        btn_slider_j = QPushButton("Select Slider (Prismatic)")
-        btn_hinge.clicked.connect(self._choose_hinge)
-        btn_slider_j.clicked.connect(self._choose_slider)
-        jbtn_row.addWidget(btn_hinge)
-        jbtn_row.addWidget(btn_slider_j)
+        self._btn_hinge = QPushButton("Select Hinge (Revolute)")
+        self._btn_slider_j = QPushButton("Select Slider (Prismatic)")
+        self._btn_hinge.clicked.connect(self._choose_hinge)
+        self._btn_slider_j.clicked.connect(self._choose_slider)
+        jbtn_row.addWidget(self._btn_hinge)
+        jbtn_row.addWidget(self._btn_slider_j)
         joint_lay.addLayout(jbtn_row)
+
+        self._btn_axis = QPushButton("Select Axis (Continuous)")
+        self._btn_axis.clicked.connect(self._choose_cylinder_axis)
+        self._btn_axis.setEnabled(False)
+        joint_lay.addWidget(self._btn_axis)
 
         self._lbl_joint = QLabel("Joint: none  |  Edge: not selected")
         self._lbl_joint.setWordWrap(True)
         joint_lay.addWidget(self._lbl_joint)
 
-        limits_grp = QGroupBox("Joint Limits")
+        self._limits_grp = QGroupBox("Joint Limits")
+        limits_grp = self._limits_grp
         limits_lay = QVBoxLayout(limits_grp)
         self._lbl_limits_unit = QLabel("Select joint type above to set units.")
         self._lbl_limits_unit.setWordWrap(True)
@@ -417,12 +447,17 @@ class CuboidSelectorApp(QMainWindow):
         scroll.setWidget(panel)
         main_layout.addWidget(scroll, stretch=2)
 
+        # Connect mode radio
+        self._rb_cuboid.toggled.connect(self._on_mode_changed)
+
         # Connect slider signals
         self._w_plane_pos.valueChanged.connect(self._on_plane_pos_changed)
         self._w_yaw.valueChanged.connect(self._on_rotation_changed)
         self._w_pitch.valueChanged.connect(self._on_rotation_changed)
         self._w_roll.valueChanged.connect(self._on_rotation_changed)
         self._w_depth.valueChanged.connect(self._on_depth_changed)
+        self._w_size_u.valueChanged.connect(self._on_face_size_changed)
+        self._w_size_v.valueChanged.connect(self._on_face_size_changed)
         self._w_face_u.valueChanged.connect(self._on_face_offset_changed)
         self._w_face_v.valueChanged.connect(self._on_face_offset_changed)
 
@@ -463,7 +498,10 @@ class CuboidSelectorApp(QMainWindow):
     def _on_depth_changed(self, val: float) -> None:
         self.depth = max(1e-4, val)
         had_joint = self.current_joint_type is not None
-        self._update_cuboid_preview()
+        if self._selection_mode == "cylinder":
+            self._update_cylinder_preview()
+        else:
+            self._update_cuboid_preview()
         self.plotter.render()
         if had_joint:
             self._set_status("[warn] Depth changed — joint/edge selection cleared. Reselect.")
@@ -472,11 +510,36 @@ class CuboidSelectorApp(QMainWindow):
         self.face_offset_u = self._w_face_u.value()
         self.face_offset_v = self._w_face_v.value()
         had_joint = self.current_joint_type is not None
+        if self._selection_mode == "cylinder":
+            self._update_cylinder_preview()
+        else:
+            self._update_face_preview()
+            self._update_cuboid_preview()
+        self.plotter.render()
+        if had_joint:
+            self._set_status("[warn] Face moved — joint/edge selection cleared. Reselect.")
+
+    def _on_face_size_changed(self, _=None) -> None:
+        if self._selection_mode == "cylinder":
+            return
+        # Use face center if available; fall back to first click point as center
+        center = self._face_center_uv
+        if center is None:
+            if self.face.p0_uv is not None:
+                center = self.face.p0_uv.copy()
+                self._face_center_uv = center
+            else:
+                return
+        hu = self._w_size_u.value() / 2.0
+        hv = self._w_size_v.value() / 2.0
+        self.face.p0_uv = center + np.array([-hu, -hv])
+        self.face.p1_uv = center + np.array([hu, hv])
+        had_joint = self.current_joint_type is not None
         self._update_face_preview()
         self._update_cuboid_preview()
         self.plotter.render()
         if had_joint:
-            self._set_status("[warn] Face moved — joint/edge selection cleared. Reselect.")
+            self._set_status("[warn] Face resized — joint/edge selection cleared. Reselect.")
 
     # -----------------------------------------------------------------------
     # Plane / face rendering
@@ -500,8 +563,11 @@ class CuboidSelectorApp(QMainWindow):
             color="deepskyblue", opacity=0.25, show_edges=True,
             name="construction_plane", pickable=True,
         )
-        self._update_face_preview()
-        self._update_cuboid_preview()
+        if self._selection_mode == "cylinder":
+            self._update_cylinder_preview()
+        else:
+            self._update_face_preview()
+            self._update_cuboid_preview()
         self.plotter.render()
 
     def _update_face_preview(self) -> None:
@@ -599,12 +665,35 @@ class CuboidSelectorApp(QMainWindow):
             self.last_pick_world = p_world
             uv = self._world_to_plane_uv(p_world)
 
+            if self._selection_mode == "cylinder":
+                if self._cyl_center_uv is None:
+                    self._cyl_center_uv = uv
+                    self._set_status("Cylinder center set — click perimeter point.")
+                elif self._cyl_radius <= 0:
+                    r = float(np.linalg.norm(uv - self._cyl_center_uv))
+                    if r < 1e-9:
+                        self._set_status("[warn] Perimeter point too close to center.")
+                        return
+                    self._cyl_radius = r
+                    self._set_status("Cylinder defined. Click 'Select Axis (Continuous)' or reset.")
+                else:
+                    self._set_status("Cylinder already set. Use offset sliders or reset.")
+                    return
+                self._update_cylinder_preview()
+                self.plotter.render()
+                return
+
             if self.face.p0_uv is None:
                 self.face.p0_uv = uv
                 self._set_status("p0 set — click to set p1.")
             elif self.face.p1_uv is None:
                 self.face.p1_uv = uv
-                self._set_status("Face defined. Select joint type or reset.")
+                self._face_center_uv = 0.5 * (self.face.p0_uv + uv)
+                size_u = abs(uv[0] - self.face.p0_uv[0])
+                size_v = abs(uv[1] - self.face.p0_uv[1])
+                self._w_size_u.set_value(size_u)
+                self._w_size_v.set_value(size_v)
+                self._set_status("Face defined. Select joint type or resize with Width/Height sliders.")
             else:
                 self._set_status("Face already set. Use offset sliders to fine-tune, or reset.")
                 return
@@ -619,10 +708,114 @@ class CuboidSelectorApp(QMainWindow):
     # Button actions
     # -----------------------------------------------------------------------
 
+    # -----------------------------------------------------------------------
+    # Mode switching
+    # -----------------------------------------------------------------------
+
+    def _on_mode_changed(self) -> None:
+        mode = "cuboid" if self._rb_cuboid.isChecked() else "cylinder"
+        if mode == self._selection_mode:
+            return
+        self._selection_mode = mode
+        self._reset_face()
+        cuboid_mode = mode == "cuboid"
+        self._btn_hinge.setEnabled(cuboid_mode)
+        self._btn_slider_j.setEnabled(cuboid_mode)
+        self._btn_axis.setEnabled(not cuboid_mode)
+        self._limits_grp.setVisible(cuboid_mode)
+        if cuboid_mode:
+            self._set_status("Click twice on the blue plane to define a face.")
+        else:
+            self._set_status("Cylinder mode: click center, then perimeter point.")
+
+    # -----------------------------------------------------------------------
+    # Cylinder helpers
+    # -----------------------------------------------------------------------
+
+    def _effective_cylinder_center_uv(self) -> np.ndarray | None:
+        if self._cyl_center_uv is None:
+            return None
+        off = np.array([self.face_offset_u, self.face_offset_v], dtype=float)
+        return self._cyl_center_uv + off
+
+    def _update_cylinder_preview(self) -> None:
+        """Rebuild cylinder wireframe from current cylinder state."""
+        for attr in ("face_actor", "box_actor", "edge_actor"):
+            actor = getattr(self, attr)
+            if actor is not None:
+                self.plotter.remove_actor(actor)
+                setattr(self, attr, None)
+
+        self.current_cylinder = None
+        self.current_edge = None
+        self.current_joint_type = None
+        self.current_joint_limits = None
+        self._staged_child_mesh = None
+        self._lbl_joint.setText("Joint: none  |  Edge: not selected")
+
+        center_uv = self._effective_cylinder_center_uv()
+        if center_uv is None:
+            return
+
+        center_world = self._plane_uv_to_world(center_uv)
+
+        if self._cyl_radius <= 1e-9:
+            # Show center marker only
+            sphere = pv.Sphere(radius=self.scene_diag * 0.005, center=center_world)
+            self.box_actor = self.plotter.add_mesh(sphere, color="orange", name="cyl_center")
+            return
+
+        n = self.plane_n
+        half_n = 0.5 * self.depth
+        cyl_center = center_world + self.extrude_sign * half_n * n
+
+        self.current_cylinder = OrientedCylinder(
+            center=cyl_center,
+            axis=n,
+            radius=self._cyl_radius,
+            half_height=half_n,
+        )
+
+        cyl_wire = pv.Cylinder(
+            center=cyl_center,
+            direction=n,
+            radius=self._cyl_radius,
+            height=self.depth,
+            resolution=32,
+            capping=True,
+        )
+        self.box_actor = self.plotter.add_mesh(
+            cyl_wire, color="red", style="wireframe", line_width=2,
+            name="cylinder_preview",
+        )
+
+    def _choose_cylinder_axis(self) -> None:
+        if self.current_cylinder is None:
+            self._set_status("[warn] No cylinder defined yet.")
+            return
+        c = self.current_cylinder
+        p0 = c.center - c.half_height * c.axis
+        p1 = c.center + c.half_height * c.axis
+        edge = Edge(p0_world=p0, p1_world=p1)
+        self.current_edge = edge
+        self.current_joint_type = "continuous"
+        self.current_joint_limits = JointLimits(-np.pi, np.pi, "rad")
+        self._lbl_joint.setText("Joint: continuous  |  Axis selected")
+        if self.edge_actor is not None:
+            self.plotter.remove_actor(self.edge_actor)
+        self.edge_actor = self.plotter.add_mesh(
+            pv.Line(p0, p1), color="lime", line_width=8, name="edge_selection"
+        )
+        self.plotter.render()
+        self._set_status("Cylinder axis selected as continuous joint.")
+
     def _flip_extrusion_direction(self) -> None:
         self.extrude_sign *= -1.0
         had_joint = self.current_joint_type is not None
-        self._update_cuboid_preview()
+        if self._selection_mode == "cylinder":
+            self._update_cylinder_preview()
+        else:
+            self._update_cuboid_preview()
         self.plotter.render()
         msg = f"Extrusion: {'+normal' if self.extrude_sign > 0 else '-normal'}"
         if had_joint:
@@ -648,9 +841,13 @@ class CuboidSelectorApp(QMainWindow):
         self.face = FaceSelection()
         self.face_offset_u = 0.0
         self.face_offset_v = 0.0
+        self._face_center_uv = None
         self._w_face_u.set_value(0.0)
         self._w_face_v.set_value(0.0)
         self.current_cuboid = None
+        self.current_cylinder = None
+        self._cyl_center_uv = None
+        self._cyl_radius = 0.0
         self.current_edge = None
         self.current_joint_type = None
         self.current_joint_limits = None
@@ -761,6 +958,30 @@ class CuboidSelectorApp(QMainWindow):
         self._set_status("Cuboid info printed to console.")
 
     def _apply_door(self) -> None:
+        if self._selection_mode == "cylinder":
+            if self.current_cylinder is None:
+                self._set_status("[warn] No cylinder defined yet.")
+                return
+            if self.current_edge is None:
+                self._set_status("[warn] Select axis joint first.")
+                return
+            try:
+                result = split_mesh_by_cylinder_clip(self.mesh_tm, self.current_cylinder)
+                hinge = np.asarray(self.current_edge.p0_world, dtype=float)
+                door_mesh, _ = cut_cylinder_with_surface(
+                    result.inside_mesh, self.current_cylinder,
+                    clip_loops=result.clip_loops or None,
+                )
+                door_mesh.vertices = door_mesh.vertices - hinge
+                self._staged_child_mesh = door_mesh
+                self._set_status(
+                    f"Cylinder door preview — {len(door_mesh.faces)} faces. "
+                    f"Click 'Add Door' to queue it."
+                )
+            except Exception as exc:
+                self._set_status(f"[error] door: {exc}")
+            return
+
         if self.current_cuboid is None:
             self._set_status("[warn] No cuboid defined yet.")
             return
@@ -784,6 +1005,56 @@ class CuboidSelectorApp(QMainWindow):
             self._set_status(f"[error] door: {exc}")
 
     def _add_door(self) -> None:
+        if self._selection_mode == "cylinder":
+            if self.current_cylinder is None:
+                self._set_status("[warn] No cylinder defined yet.")
+                return
+            if self.current_edge is None or self.current_joint_type is None or self.current_joint_limits is None:
+                self._set_status("[warn] Select axis joint first.")
+                return
+
+            # Overlap check against all existing selections
+            centroids = self.mesh_tm.triangles_center
+            new_inside = self.current_cylinder.contains(centroids)
+            for i, e in enumerate(self._articulations):
+                other = e.cuboid.contains(centroids) if e.cuboid is not None else e.cylinder.contains(centroids)
+                if (new_inside & other).any():
+                    self._set_status(f"[error] Cylinder overlaps existing selection {i}.")
+                    return
+
+            if self._staged_child_mesh is None:
+                self._apply_door()
+                if self._staged_child_mesh is None:
+                    return
+
+            cyl = self.current_cylinder
+            actor = self.plotter.add_mesh(
+                pv.Cylinder(
+                    center=cyl.center, direction=cyl.axis,
+                    radius=cyl.radius, height=2 * cyl.half_height,
+                    resolution=32, capping=True,
+                ),
+                color="lime", style="wireframe", line_width=2,
+                name=f"door_cyl_{len(self._articulations)}",
+            )
+            entry = ArticulationEntry(
+                edge=self.current_edge,
+                joint_type=self.current_joint_type,
+                joint_limits=self.current_joint_limits,
+                door_mesh=self._staged_child_mesh,
+                hinge_origin=np.asarray(self.current_edge.p0_world, dtype=float),
+                cylinder=self.current_cylinder,
+                box_actor=actor,
+            )
+            self._articulations.append(entry)
+            self._lbl_doors.setText(f"Doors queued: {len(self._articulations)}")
+            self._set_status(
+                f"Cylinder {len(self._articulations) - 1} added "
+                f"({len(self._staged_child_mesh.faces)} faces). Reset to add another."
+            )
+            self._reset_face()
+            return
+
         if self.current_cuboid is None:
             self._set_status("[warn] No cuboid defined yet.")
             return
@@ -791,8 +1062,8 @@ class CuboidSelectorApp(QMainWindow):
             self._set_status("[warn] Select joint type and limits first.")
             return
 
-        # Check for overlap with already-queued cuboids
-        existing = [e.cuboid for e in self._articulations]
+        # Check for overlap with already-queued cuboids (ignore cylinder entries)
+        existing = [e.cuboid for e in self._articulations if e.cuboid is not None]
         try:
             split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid, existing_cuboids=existing)
         except ValueError as exc:
@@ -829,12 +1100,12 @@ class CuboidSelectorApp(QMainWindow):
         )
 
         entry = ArticulationEntry(
-            cuboid=self.current_cuboid,
             edge=self.current_edge,
             joint_type=self.current_joint_type,
             joint_limits=self.current_joint_limits,
             door_mesh=self._staged_child_mesh,
             hinge_origin=np.asarray(self.current_edge.p0_world, dtype=float),
+            cuboid=self.current_cuboid,
             box_actor=actor,
         )
         self._articulations.append(entry)
@@ -867,7 +1138,10 @@ class CuboidSelectorApp(QMainWindow):
             # Compute remainder by sequentially removing each door from the original mesh
             remainder = self.mesh_tm.copy()
             for entry in self._articulations:
-                clip_result = split_mesh_by_cuboid_clip(remainder, entry.cuboid)
+                if entry.cuboid is not None:
+                    clip_result = split_mesh_by_cuboid_clip(remainder, entry.cuboid)
+                else:
+                    clip_result = split_mesh_by_cylinder_clip(remainder, entry.cylinder)
                 remainder = clip_result.outside_mesh
 
             if self._chk_slice_only.isChecked():
@@ -938,7 +1212,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/lab_reconstruction/stove.stl")
+    window = CuboidSelectorApp("data/input/microwave.stl")
     window.run()
     sys.exit(app.exec_())
 

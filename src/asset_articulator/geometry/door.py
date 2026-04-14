@@ -8,6 +8,7 @@ import numpy as np
 import trimesh
 
 from asset_articulator.geometry.cuboid import OrientedCuboid
+from asset_articulator.geometry.cylinder import OrientedCylinder
 
 
 # ---------------------------------------------------------------------------
@@ -323,5 +324,44 @@ def cut_cuboid_with_surface(
     )
     trimesh.repair.fix_normals(result)
     print(f"[door] final: {len(result.vertices)} verts, {len(result.faces)} faces  "
+          f"watertight={result.is_watertight}")
+    return result, back_perimeter_edges
+
+
+def cut_cylinder_with_surface(
+    surface_mesh: trimesh.Trimesh,
+    cylinder: OrientedCylinder,
+    clip_loops: list[np.ndarray] | None = None,
+) -> tuple[trimesh.Trimesh, np.ndarray]:
+    """Build cylinder door geometry via boundary-loop extrusion.
+
+    Identical workflow to ``cut_cuboid_with_surface`` but uses the cylinder axis
+    directly as the extrusion direction instead of detecting a thin cuboid axis.
+
+    The flat-cap clip loops (from ``split_mesh_by_cylinder_clip``) are extruded
+    to the far cap, producing the closing geometry for the rotating piece.
+    """
+    d = cylinder.axis.copy()
+    face_normals = surface_mesh.face_normals
+    dot_pos = float((face_normals @ d).sum())
+    dot_neg = float((face_normals @ (-d)).sum())
+    if dot_pos < dot_neg:
+        d = -d
+
+    back_origin = cylinder.center - cylinder.half_height * d
+
+    if not clip_loops:
+        print("[door/cyl] WARNING: no clip_loops — returning surface mesh unchanged")
+        return trimesh.Trimesh(
+            vertices=surface_mesh.vertices.copy(),
+            faces=surface_mesh.faces.copy(),
+            process=False,
+        ), np.empty((0, 2, 3), dtype=float)
+
+    extrusion, back_perimeter_edges = _extrude_loops(clip_loops, back_origin, d)
+    combined = trimesh.util.concatenate([surface_mesh, extrusion])
+    result = trimesh.Trimesh(vertices=combined.vertices, faces=combined.faces, process=True)
+    trimesh.repair.fix_normals(result)
+    print(f"[door/cyl] final: {len(result.vertices)} verts, {len(result.faces)} faces  "
           f"watertight={result.is_watertight}")
     return result, back_perimeter_edges
