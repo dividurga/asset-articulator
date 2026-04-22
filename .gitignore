@@ -161,3 +161,8 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+
+# Large input files (exceed GitHub 100MB limit)
+data/input/170_corner_meshed.ply
+data/input/Onion-Scan-Mesh.stl
+data/input/lab_good.stl

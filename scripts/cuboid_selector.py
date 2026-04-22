@@ -392,7 +392,7 @@ class CuboidSelectorApp(QMainWindow):
         jbtn_row.addWidget(self._btn_slider_j)
         joint_lay.addLayout(jbtn_row)
 
-        self._btn_axis = QPushButton("Select Axis (Continuous)")
+        self._btn_axis = QPushButton("Select Axis (Revolute)")
         self._btn_axis.clicked.connect(self._choose_cylinder_axis)
         self._btn_axis.setEnabled(False)
         joint_lay.addWidget(self._btn_axis)
@@ -418,20 +418,28 @@ class CuboidSelectorApp(QMainWindow):
         actions_grp = QGroupBox("Actions")
         actions_lay = QVBoxLayout(actions_grp)
         btn_reset     = QPushButton("Reset Face Selection")
-        btn_door      = QPushButton("Preview Door")
-        btn_add_door  = QPushButton("Add Door")
-        btn_clear     = QPushButton("Clear All Doors")
+        self._btn_preview_door = QPushButton("Preview Door")
+        self._btn_add_door     = QPushButton("Add Door")
+        self._btn_preview_cyl  = QPushButton("Preview Cylinder")
+        self._btn_add_cyl      = QPushButton("Add Cylinder")
+        btn_clear     = QPushButton("Clear All Selections")
         btn_urdf      = QPushButton("Export URDF")
         btn_print     = QPushButton("Print Cuboid Info")
         btn_reset.clicked.connect(self._reset_face)
-        btn_door.clicked.connect(self._apply_door)
-        btn_add_door.clicked.connect(self._add_door)
+        self._btn_preview_door.clicked.connect(self._apply_door)
+        self._btn_add_door.clicked.connect(self._add_door)
+        self._btn_preview_cyl.clicked.connect(self._apply_cylinder)
+        self._btn_add_cyl.clicked.connect(self._add_cylinder)
+        self._btn_preview_cyl.setEnabled(False)
+        self._btn_add_cyl.setEnabled(False)
         btn_clear.clicked.connect(self._clear_doors)
         btn_urdf.clicked.connect(self._create_urdf_file)
         btn_print.clicked.connect(self._print_current_cuboid)
         self._chk_slice_only = QCheckBox("Slice only (export single combined mesh)")
         self._lbl_doors = QLabel("Doors queued: 0")
-        for b in (btn_reset, btn_door, btn_add_door, btn_clear, btn_urdf, btn_print):
+        for b in (btn_reset, self._btn_preview_door, self._btn_add_door,
+                  self._btn_preview_cyl, self._btn_add_cyl,
+                  btn_clear, btn_urdf, btn_print):
             actions_lay.addWidget(b)
         actions_lay.addWidget(self._chk_slice_only)
         actions_lay.addWidget(self._lbl_doors)
@@ -722,10 +730,17 @@ class CuboidSelectorApp(QMainWindow):
         self._btn_hinge.setEnabled(cuboid_mode)
         self._btn_slider_j.setEnabled(cuboid_mode)
         self._btn_axis.setEnabled(not cuboid_mode)
-        self._limits_grp.setVisible(cuboid_mode)
+        self._btn_preview_door.setEnabled(cuboid_mode)
+        self._btn_add_door.setEnabled(cuboid_mode)
+        self._btn_preview_cyl.setEnabled(not cuboid_mode)
+        self._btn_add_cyl.setEnabled(not cuboid_mode)
+        self._limits_grp.setVisible(True)
         if cuboid_mode:
             self._set_status("Click twice on the blue plane to define a face.")
         else:
+            self._w_lower.set_range(-360.0, 360.0)
+            self._w_upper.set_range(-360.0, 360.0)
+            self._lbl_limits_unit.setText("Revolute: values in degrees")
             self._set_status("Cylinder mode: click center, then perimeter point.")
 
     # -----------------------------------------------------------------------
@@ -793,21 +808,31 @@ class CuboidSelectorApp(QMainWindow):
         if self.current_cylinder is None:
             self._set_status("[warn] No cylinder defined yet.")
             return
+
+        lower_ui = self._w_lower.value()
+        upper_ui = self._w_upper.value()
+        if lower_ui >= upper_ui:
+            self._set_status("[error] Lower limit must be strictly less than upper limit.")
+            return
+        lower = np.deg2rad(lower_ui)
+        upper = np.deg2rad(upper_ui)
+        limits_str = f"[{lower_ui:.1f}°, {upper_ui:.1f}°]"
+
         c = self.current_cylinder
         p0 = c.center - c.half_height * c.axis
         p1 = c.center + c.half_height * c.axis
         edge = Edge(p0_world=p0, p1_world=p1)
         self.current_edge = edge
-        self.current_joint_type = "continuous"
-        self.current_joint_limits = JointLimits(-np.pi, np.pi, "rad")
-        self._lbl_joint.setText("Joint: continuous  |  Axis selected")
+        self.current_joint_type = "revolute"
+        self.current_joint_limits = JointLimits(lower=lower, upper=upper, unit="rad")
+        self._lbl_joint.setText(f"Joint: revolute  |  Limits: {limits_str}")
         if self.edge_actor is not None:
             self.plotter.remove_actor(self.edge_actor)
         self.edge_actor = self.plotter.add_mesh(
             pv.Line(p0, p1), color="lime", line_width=8, name="edge_selection"
         )
         self.plotter.render()
-        self._set_status("Cylinder axis selected as continuous joint.")
+        self._set_status(f"Cylinder axis selected as revolute joint. Limits: {limits_str}")
 
     def _flip_extrusion_direction(self) -> None:
         self.extrude_sign *= -1.0
@@ -956,6 +981,12 @@ class CuboidSelectorApp(QMainWindow):
         print(f"rotation = np.array({self.current_cuboid.rotation.tolist()})")
         print(f"extents = np.array({self.current_cuboid.extents.tolist()})\n")
         self._set_status("Cuboid info printed to console.")
+
+    def _apply_cylinder(self) -> None:
+        self._apply_door()
+
+    def _add_cylinder(self) -> None:
+        self._add_door()
 
     def _apply_door(self) -> None:
         if self._selection_mode == "cylinder":
@@ -1212,7 +1243,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/microwave.stl")
+    window = CuboidSelectorApp("data/input/object.stl")
     window.run()
     sys.exit(app.exec_())
 
