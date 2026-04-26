@@ -1,11 +1,31 @@
 <?xml version="1.0" ?>
 <robot name="articulated_object">
+  <material name="pastel_gray">
+    <color rgba="0.50 0.50 0.55 1.0"/>
+  </material>
+  <material name="pastel_pink">
+    <color rgba="1.00 0.20 0.40 1.0"/>
+  </material>
+  <material name="pastel_blue">
+    <color rgba="0.10 0.45 1.00 1.0"/>
+  </material>
+  <material name="pastel_green">
+    <color rgba="0.10 0.80 0.20 1.0"/>
+  </material>
+  <material name="pastel_peach">
+    <color rgba="1.00 0.55 0.10 1.0"/>
+  </material>
+  <material name="pastel_lavender">
+    <color rgba="0.60 0.10 1.00 1.0"/>
+  </material>
+
   <link name="base">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
         <mesh filename="base.stl"/>
       </geometry>
+      <material name="pastel_gray"/>
     </visual>
   </link>
   <link name="door_0">
@@ -14,12 +34,77 @@
       <geometry>
         <mesh filename="door_0.stl"/>
       </geometry>
+      <material name="pastel_pink"/>
     </visual>
   </link>
   <joint name="joint_0" type="revolute">
     <parent link="base"/>
     <child link="door_0"/>
-    <origin xyz="0.45650975 0.20805626 0.06646188" rpy="0 0 0"/>
+    <origin xyz="0.78050875 3.37366374 0.06218131" rpy="0 0 0"/>
+    <axis xyz="0.80489380 -0.59341889 0.00000000"/>
+    <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
+  </joint>
+  <link name="door_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="door_1.stl"/>
+      </geometry>
+      <material name="pastel_blue"/>
+    </visual>
+  </link>
+  <joint name="joint_1" type="revolute">
+    <parent link="base"/>
+    <child link="door_1"/>
+    <origin xyz="1.25957137 3.44370797 2.18808459" rpy="0 0 0"/>
+    <axis xyz="0.00000000 0.00000000 -1.00000000"/>
+    <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
+  </joint>
+  <link name="door_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="door_2.stl"/>
+      </geometry>
+      <material name="pastel_green"/>
+    </visual>
+  </link>
+  <joint name="joint_2" type="revolute">
+    <parent link="base"/>
+    <child link="door_2"/>
+    <origin xyz="1.94390429 2.93917422 1.30240181" rpy="0 0 0"/>
+    <axis xyz="0.00000000 0.00000000 1.00000000"/>
+    <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
+  </joint>
+  <link name="door_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="door_3.stl"/>
+      </geometry>
+      <material name="pastel_peach"/>
+    </visual>
+  </link>
+  <joint name="joint_3" type="revolute">
+    <parent link="base"/>
+    <child link="door_3"/>
+    <origin xyz="1.24660140 0.71035769 -0.24380492" rpy="0 0 0"/>
+    <axis xyz="0.00000000 0.00000000 1.00000000"/>
+    <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
+  </joint>
+  <link name="door_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="door_4.stl"/>
+      </geometry>
+      <material name="pastel_lavender"/>
+    </visual>
+  </link>
+  <joint name="joint_4" type="revolute">
+    <parent link="base"/>
+    <child link="door_4"/>
+    <origin xyz="1.24778859 0.71191046 0.82024347" rpy="0 0 0"/>
     <axis xyz="0.00000000 0.00000000 1.00000000"/>
     <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
   </joint>

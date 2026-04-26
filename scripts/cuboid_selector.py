@@ -569,7 +569,7 @@ class CuboidSelectorApp(QMainWindow):
         self.plane_actor = self.plotter.add_mesh(
             self._make_plane_mesh(),
             color="deepskyblue", opacity=0.25, show_edges=True,
-            name="construction_plane", pickable=True,
+            name="construction_plane", pickable=True, reset_camera=False,
         )
         if self._selection_mode == "cylinder":
             self._update_cylinder_preview()
@@ -599,7 +599,7 @@ class CuboidSelectorApp(QMainWindow):
         quad = pv.PolyData(corners_world, np.hstack([[4, 0, 1, 2, 3]]))
         self.face_actor = self.plotter.add_mesh(
             quad, color="orange", opacity=0.45, show_edges=True,
-            line_width=3, name="face_preview",
+            line_width=3, name="face_preview", reset_camera=False,
         )
 
     def _update_cuboid_preview(self) -> None:
@@ -661,7 +661,7 @@ class CuboidSelectorApp(QMainWindow):
         wire = pv.PolyData()
         wire.points = corners_world
         wire.lines = np.array(line_cells, dtype=np.int32)
-        self.box_actor = self.plotter.add_mesh(wire, color="red", line_width=3, name="cuboid_preview")
+        self.box_actor = self.plotter.add_mesh(wire, color="red", line_width=3, name="cuboid_preview", reset_camera=False)
 
     # -----------------------------------------------------------------------
     # Pick callback
@@ -777,7 +777,7 @@ class CuboidSelectorApp(QMainWindow):
         if self._cyl_radius <= 1e-9:
             # Show center marker only
             sphere = pv.Sphere(radius=self.scene_diag * 0.005, center=center_world)
-            self.box_actor = self.plotter.add_mesh(sphere, color="orange", name="cyl_center")
+            self.box_actor = self.plotter.add_mesh(sphere, color="orange", name="cyl_center", reset_camera=False)
             return
 
         n = self.plane_n
@@ -801,7 +801,7 @@ class CuboidSelectorApp(QMainWindow):
         )
         self.box_actor = self.plotter.add_mesh(
             cyl_wire, color="red", style="wireframe", line_width=2,
-            name="cylinder_preview",
+            name="cylinder_preview", reset_camera=False,
         )
 
     def _choose_cylinder_axis(self) -> None:
@@ -829,7 +829,7 @@ class CuboidSelectorApp(QMainWindow):
         if self.edge_actor is not None:
             self.plotter.remove_actor(self.edge_actor)
         self.edge_actor = self.plotter.add_mesh(
-            pv.Line(p0, p1), color="lime", line_width=8, name="edge_selection"
+            pv.Line(p0, p1), color="lime", line_width=8, name="edge_selection", reset_camera=False,
         )
         self.plotter.render()
         self._set_status(f"Cylinder axis selected as revolute joint. Limits: {limits_str}")
@@ -954,7 +954,7 @@ class CuboidSelectorApp(QMainWindow):
             self.plotter.remove_actor(self.edge_actor)
         edge_line = pv.Line(edge.p0_world, edge.p1_world)
         self.edge_actor = self.plotter.add_mesh(
-            edge_line, color="lime", line_width=8, name="edge_selection"
+            edge_line, color="lime", line_width=8, name="edge_selection", reset_camera=False,
         )
         self.plotter.render()
         self._set_status(f"[{joint_type}] edge selected. Limits: {limits_str}")
@@ -1066,7 +1066,7 @@ class CuboidSelectorApp(QMainWindow):
                     resolution=32, capping=True,
                 ),
                 color="lime", style="wireframe", line_width=2,
-                name=f"door_cyl_{len(self._articulations)}",
+                name=f"door_cyl_{len(self._articulations)}", reset_camera=False,
             )
             entry = ArticulationEntry(
                 edge=self.current_edge,
@@ -1127,7 +1127,7 @@ class CuboidSelectorApp(QMainWindow):
         wire.lines = np.array(lines, dtype=np.int32)
         actor = self.plotter.add_mesh(
             wire, color="lime", line_width=2,
-            name=f"door_box_{len(self._articulations)}",
+            name=f"door_box_{len(self._articulations)}", reset_camera=False,
         )
 
         entry = ArticulationEntry(
@@ -1243,7 +1243,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/object.stl")
+    window = CuboidSelectorApp("data/input/kitchen.stl")
     window.run()
     sys.exit(app.exec_())
 
