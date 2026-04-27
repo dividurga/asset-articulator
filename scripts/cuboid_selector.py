@@ -217,11 +217,32 @@ class CuboidSelectorApp(QMainWindow):
         self._face_center_uv: np.ndarray | None = None
 
         # Selection mode ---------------------------------------------------
-        self._selection_mode: str = "cuboid"  # "cuboid" or "cylinder"
+        self._selection_mode: str = "cuboid"  # "cuboid", "cylinder", or "cabinet"
         self._cyl_center_uv: np.ndarray | None = None
         self._cyl_radius: float = 0.0
 
+        # Cabinet mode state -----------------------------------------------
+        self._cab_split_u: float | None = None   # split coord when axis == "u" (vertical split)
+        self._cab_split_v: float | None = None   # split coord when axis == "v" (horizontal split)
+        self._cab_split_axis: str = "u"          # "u" = vertical split, "v" = horizontal split
+        self._cab_snap_pt_uv: np.ndarray | None = None  # edge snap point in plane UV
+        self._cab_left_cuboid: OrientedCuboid | None = None
+        self._cab_right_cuboid: OrientedCuboid | None = None
+        self._cab_left_edge: Edge | None = None
+        self._cab_right_edge: Edge | None = None
+        self._cab_left_limits: JointLimits | None = None
+        self._cab_right_limits: JointLimits | None = None
+        self._cab_state: str = "face"   # "face" | "split" | "hinge"
+        self._cab_hinge_target: str | None = None       # "left" | "right"
+        self._cab_split_actor = None
+        self._cab_snap_pt_actor = None
+        self._cab_left_box_actor = None
+        self._cab_right_box_actor = None
+        self._cab_left_edge_actor = None
+        self._cab_right_edge_actor = None
+
         # Joint state ------------------------------------------------------
+        self._joint_armed: str | None = None  # "revolute" | "prismatic" | None
         self.current_cuboid: OrientedCuboid | None = None
         self.current_cylinder: OrientedCylinder | None = None
         self.current_edge: Edge | None = None
@@ -323,12 +344,15 @@ class CuboidSelectorApp(QMainWindow):
         mode_lay = QHBoxLayout(mode_grp)
         self._rb_cuboid = QRadioButton("Cuboid")
         self._rb_cylinder = QRadioButton("Cylinder")
+        self._rb_cabinet = QRadioButton("Cabinet")
         self._rb_cuboid.setChecked(True)
         self._btn_grp_mode = QButtonGroup()
         self._btn_grp_mode.addButton(self._rb_cuboid)
         self._btn_grp_mode.addButton(self._rb_cylinder)
+        self._btn_grp_mode.addButton(self._rb_cabinet)
         mode_lay.addWidget(self._rb_cuboid)
         mode_lay.addWidget(self._rb_cylinder)
+        mode_lay.addWidget(self._rb_cabinet)
         pl.addWidget(mode_grp)
 
         # ---- Plane ----
@@ -383,6 +407,18 @@ class CuboidSelectorApp(QMainWindow):
         joint_grp = QGroupBox("Joint")
         joint_lay = QVBoxLayout(joint_grp)
 
+        self._limits_grp = QGroupBox("Joint Limits")
+        limits_grp = self._limits_grp
+        limits_lay = QVBoxLayout(limits_grp)
+        self._lbl_limits_unit = QLabel("Set limits, then click a joint button below.")
+        self._lbl_limits_unit.setWordWrap(True)
+        self._w_lower = SliderSpinBox("Lower limit", -360.0, 360.0, -90.0, decimals=3)
+        self._w_upper = SliderSpinBox("Upper limit", -360.0, 360.0,  90.0, decimals=3)
+        limits_lay.addWidget(self._lbl_limits_unit)
+        limits_lay.addWidget(self._w_lower)
+        limits_lay.addWidget(self._w_upper)
+        joint_lay.addWidget(limits_grp)
+
         jbtn_row = QHBoxLayout()
         self._btn_hinge = QPushButton("Select Hinge (Revolute)")
         self._btn_slider_j = QPushButton("Select Slider (Prismatic)")
@@ -401,17 +437,6 @@ class CuboidSelectorApp(QMainWindow):
         self._lbl_joint.setWordWrap(True)
         joint_lay.addWidget(self._lbl_joint)
 
-        self._limits_grp = QGroupBox("Joint Limits")
-        limits_grp = self._limits_grp
-        limits_lay = QVBoxLayout(limits_grp)
-        self._lbl_limits_unit = QLabel("Select joint type above to set units.")
-        self._lbl_limits_unit.setWordWrap(True)
-        self._w_lower = SliderSpinBox("Lower limit", -360.0, 360.0, -90.0, decimals=3)
-        self._w_upper = SliderSpinBox("Upper limit", -360.0, 360.0,  90.0, decimals=3)
-        limits_lay.addWidget(self._lbl_limits_unit)
-        limits_lay.addWidget(self._w_lower)
-        limits_lay.addWidget(self._w_upper)
-        joint_lay.addWidget(limits_grp)
         pl.addWidget(joint_grp)
 
         # ---- Actions ----
@@ -445,6 +470,42 @@ class CuboidSelectorApp(QMainWindow):
         actions_lay.addWidget(self._lbl_doors)
         pl.addWidget(actions_grp)
 
+        # ---- Cabinet Split ----
+        self._cabinet_grp = QGroupBox("Cabinet Split")
+        cabinet_lay = QVBoxLayout(self._cabinet_grp)
+
+        self._lbl_cab_step = QLabel("Step 1: Click twice to define face.")
+        self._lbl_cab_step.setWordWrap(True)
+        cabinet_lay.addWidget(self._lbl_cab_step)
+
+        self._btn_cab_resplit = QPushButton("Re-pick Split Line")
+        self._btn_cab_resplit.clicked.connect(self._cab_enter_split_mode)
+        self._btn_cab_resplit.setEnabled(False)
+        cabinet_lay.addWidget(self._btn_cab_resplit)
+
+        hinge_row = QHBoxLayout()
+        self._btn_cab_left = QPushButton("Select Left Hinge")
+        self._btn_cab_right = QPushButton("Select Right Hinge")
+        self._btn_cab_left.clicked.connect(lambda: self._cab_arm_hinge("left"))
+        self._btn_cab_right.clicked.connect(lambda: self._cab_arm_hinge("right"))
+        self._btn_cab_left.setEnabled(False)
+        self._btn_cab_right.setEnabled(False)
+        hinge_row.addWidget(self._btn_cab_left)
+        hinge_row.addWidget(self._btn_cab_right)
+        cabinet_lay.addLayout(hinge_row)
+
+        self._lbl_cab_edges = QLabel("Left: none  |  Right: none")
+        self._lbl_cab_edges.setWordWrap(True)
+        cabinet_lay.addWidget(self._lbl_cab_edges)
+
+        self._btn_add_cabinet = QPushButton("Add Cabinet")
+        self._btn_add_cabinet.clicked.connect(self._add_cabinet)
+        self._btn_add_cabinet.setEnabled(False)
+        cabinet_lay.addWidget(self._btn_add_cabinet)
+
+        pl.addWidget(self._cabinet_grp)
+        self._cabinet_grp.setVisible(False)
+
         # Status label
         self._lbl_status = QLabel("Click twice on the blue plane to define a face.")
         self._lbl_status.setWordWrap(True)
@@ -457,6 +518,7 @@ class CuboidSelectorApp(QMainWindow):
 
         # Connect mode radio
         self._rb_cuboid.toggled.connect(self._on_mode_changed)
+        self._rb_cabinet.toggled.connect(self._on_mode_changed)
 
         # Connect slider signals
         self._w_plane_pos.valueChanged.connect(self._on_plane_pos_changed)
@@ -508,6 +570,8 @@ class CuboidSelectorApp(QMainWindow):
         had_joint = self.current_joint_type is not None
         if self._selection_mode == "cylinder":
             self._update_cylinder_preview()
+        elif self._selection_mode == "cabinet":
+            self._update_cabinet_preview()
         else:
             self._update_cuboid_preview()
         self.plotter.render()
@@ -520,6 +584,9 @@ class CuboidSelectorApp(QMainWindow):
         had_joint = self.current_joint_type is not None
         if self._selection_mode == "cylinder":
             self._update_cylinder_preview()
+        elif self._selection_mode == "cabinet":
+            self._update_face_preview()
+            self._update_cabinet_preview()
         else:
             self._update_face_preview()
             self._update_cuboid_preview()
@@ -544,7 +611,10 @@ class CuboidSelectorApp(QMainWindow):
         self.face.p1_uv = center + np.array([hu, hv])
         had_joint = self.current_joint_type is not None
         self._update_face_preview()
-        self._update_cuboid_preview()
+        if self._selection_mode == "cabinet":
+            self._update_cabinet_preview()
+        else:
+            self._update_cuboid_preview()
         self.plotter.render()
         if had_joint:
             self._set_status("[warn] Face resized — joint/edge selection cleared. Reselect.")
@@ -573,6 +643,9 @@ class CuboidSelectorApp(QMainWindow):
         )
         if self._selection_mode == "cylinder":
             self._update_cylinder_preview()
+        elif self._selection_mode == "cabinet":
+            self._update_face_preview()
+            self._update_cabinet_preview()
         else:
             self._update_face_preview()
             self._update_cuboid_preview()
@@ -614,6 +687,9 @@ class CuboidSelectorApp(QMainWindow):
         self.current_joint_limits = None
         self.current_cuboid = None
         self._staged_child_mesh = None
+        self._joint_armed = None
+        self._btn_hinge.setText("Select Hinge (Revolute)")
+        self._btn_slider_j.setText("Select Slider (Prismatic)")
         self._lbl_joint.setText("Joint: none  |  Edge: not selected")
 
         p0, p1 = self._effective_face()
@@ -691,6 +767,10 @@ class CuboidSelectorApp(QMainWindow):
                 self.plotter.render()
                 return
 
+            if self._selection_mode == "cabinet":
+                self._on_cabinet_pick(uv, p_world)
+                return
+
             if self.face.p0_uv is None:
                 self.face.p0_uv = uv
                 self._set_status("p0 set — click to set p1.")
@@ -701,9 +781,13 @@ class CuboidSelectorApp(QMainWindow):
                 size_v = abs(uv[1] - self.face.p0_uv[1])
                 self._w_size_u.set_value(size_u)
                 self._w_size_v.set_value(size_v)
-                self._set_status("Face defined. Select joint type or resize with Width/Height sliders.")
+                self._set_status("Face defined. Click a joint button then click near an edge.")
             else:
-                self._set_status("Face already set. Use offset sliders to fine-tune, or reset.")
+                if self._joint_armed is not None and self.current_cuboid is not None:
+                    self._choose_edge_joint(self._joint_armed)
+                    self._joint_armed = None
+                else:
+                    self._set_status("Face already set. Use offset sliders to fine-tune, or reset.")
                 return
 
             self._update_face_preview()
@@ -711,6 +795,79 @@ class CuboidSelectorApp(QMainWindow):
             self.plotter.render()
         except Exception as exc:
             self._set_status(f"[error] pick: {exc}")
+
+    def _on_cabinet_pick(self, uv: np.ndarray, p_world: np.ndarray) -> None:
+        if self._cab_state == "face":
+            if self.face.p0_uv is None:
+                self.face.p0_uv = uv
+                self._lbl_cab_step.setText("Step 1: Click p1 (second corner).")
+                self._set_status("Cabinet: p0 set — click to set p1.")
+            elif self.face.p1_uv is None:
+                self.face.p1_uv = uv
+                self._face_center_uv = 0.5 * (self.face.p0_uv + uv)
+                self._w_size_u.set_value(abs(uv[0] - self.face.p0_uv[0]))
+                self._w_size_v.set_value(abs(uv[1] - self.face.p0_uv[1]))
+                self._cab_state = "split"
+                self._btn_cab_resplit.setEnabled(True)
+                self._lbl_cab_step.setText("Step 2: Click on a face edge to set split line.")
+                self._set_status("Cabinet: face defined — click on top/bottom edge for vertical split, left/right for horizontal.")
+            else:
+                self._set_status("Cabinet: face already set. Use sliders or Reset Face.")
+                return
+            self._update_face_preview()
+            self._update_cabinet_preview()
+            self.plotter.render()
+
+        elif self._cab_state == "split":
+            p0, p1 = self._effective_face()
+            if p0 is None:
+                return
+            umin = min(p0[0], p1[0])
+            umax = max(p0[0], p1[0])
+            vmin = min(p0[1], p1[1])
+            vmax = max(p0[1], p1[1])
+            u, v = float(uv[0]), float(uv[1])
+
+            # Snap click to the nearest face edge, then project onto it.
+            # Nearest edge determines whether the split is vertical (top/bottom edge clicked)
+            # or horizontal (left/right edge clicked).
+            d_left   = abs(u - umin)
+            d_right  = abs(u - umax)
+            d_bottom = abs(v - vmin)
+            d_top    = abs(v - vmax)
+            nearest  = min(d_left, d_right, d_bottom, d_top)
+
+            if nearest in (d_bottom, d_top):
+                # Click was on top or bottom edge → vertical split line drops across face
+                self._cab_split_axis = "u"
+                self._cab_split_u = float(np.clip(u, umin + 1e-6, umax - 1e-6))
+                self._cab_split_v = None
+                snap_v = vmin if nearest == d_bottom else vmax
+                self._cab_snap_pt_uv = np.array([self._cab_split_u, snap_v])
+                self._btn_cab_left.setText("Select Left Hinge")
+                self._btn_cab_right.setText("Select Right Hinge")
+            else:
+                # Click was on left or right edge → horizontal split line runs across face
+                self._cab_split_axis = "v"
+                self._cab_split_v = float(np.clip(v, vmin + 1e-6, vmax - 1e-6))
+                self._cab_split_u = None
+                snap_u = umin if nearest == d_left else umax
+                self._cab_snap_pt_uv = np.array([snap_u, self._cab_split_v])
+                self._btn_cab_left.setText("Select Bottom Hinge")
+                self._btn_cab_right.setText("Select Top Hinge")
+
+            self._cab_state = "hinge"
+            self._btn_cab_left.setEnabled(True)
+            self._btn_cab_right.setEnabled(True)
+            self._update_cabinet_preview()
+            self.plotter.render()
+            axis_str = "vertical" if self._cab_split_axis == "u" else "horizontal"
+            self._lbl_cab_step.setText("Step 3: Select the two hinge edges, then 'Add Cabinet'.")
+            self._set_status(f"Cabinet: {axis_str} split set. Select hinges (orange / cyan).")
+
+        elif self._cab_state == "hinge" and self._cab_hinge_target is not None:
+            self._pick_cabinet_edge(self._cab_hinge_target)
+            self._cab_hinge_target = None
 
     # -----------------------------------------------------------------------
     # Button actions
@@ -720,28 +877,404 @@ class CuboidSelectorApp(QMainWindow):
     # Mode switching
     # -----------------------------------------------------------------------
 
+    # -----------------------------------------------------------------------
+    # Cuboid wire helper
+    # -----------------------------------------------------------------------
+
+    def _draw_cuboid_wire(self, cuboid: OrientedCuboid, color: str, name: str):
+        half_u, half_v, half_n = cuboid.extents
+        corners_local = np.array([
+            [-half_u, -half_v, -half_n], [ half_u, -half_v, -half_n],
+            [ half_u,  half_v, -half_n], [-half_u,  half_v, -half_n],
+            [-half_u, -half_v,  half_n], [ half_u, -half_v,  half_n],
+            [ half_u,  half_v,  half_n], [-half_u,  half_v,  half_n],
+        ], dtype=float)
+        corners_world = cuboid.local_to_world(corners_local)
+        edge_pairs = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+        lines: list[int] = []
+        for a, b in edge_pairs:
+            lines.extend([2, a, b])
+        wire = pv.PolyData()
+        wire.points = corners_world
+        wire.lines = np.array(lines, dtype=np.int32)
+        return self.plotter.add_mesh(wire, color=color, line_width=3, name=name, reset_camera=False)
+
+    # -----------------------------------------------------------------------
+    # Cabinet helpers
+    # -----------------------------------------------------------------------
+
+    def _update_cabinet_preview(self) -> None:
+        for attr in ("_cab_split_actor", "_cab_snap_pt_actor", "_cab_left_box_actor",
+                     "_cab_right_box_actor", "box_actor"):
+            actor = getattr(self, attr)
+            if actor is not None:
+                self.plotter.remove_actor(actor)
+                setattr(self, attr, None)
+
+        self._cab_left_cuboid = None
+        self._cab_right_cuboid = None
+
+        p0, p1 = self._effective_face()
+        if p0 is None:
+            return
+
+        umin = min(p0[0], p1[0])
+        umax = max(p0[0], p1[0])
+        vmin = min(p0[1], p1[1])
+        vmax = max(p0[1], p1[1])
+
+        if (umax - umin) <= 1e-9 or (vmax - vmin) <= 1e-9:
+            return
+
+        n = self.plane_n
+        half_n = 0.5 * self.depth
+        u_center = 0.5 * (umin + umax)
+        v_center = 0.5 * (vmin + vmax)
+
+        has_split = (self._cab_split_axis == "u" and self._cab_split_u is not None) or \
+                    (self._cab_split_axis == "v" and self._cab_split_v is not None)
+
+        if not has_split:
+            # Unsplit outline while waiting for edge click
+            outline = OrientedCuboid(
+                center=self._plane_uv_to_world(np.array([u_center, v_center])) + self.extrude_sign * half_n * n,
+                rotation=np.column_stack([self.plane_u, self.plane_v, n]),
+                extents=np.array([0.5 * (umax - umin), 0.5 * (vmax - vmin), half_n], dtype=float),
+            )
+            self.box_actor = self._draw_cuboid_wire(outline, "red", "cab_outline")
+            return
+
+        # Draw snap-point marker on the clicked edge
+        if self._cab_snap_pt_uv is not None:
+            snap_world = self._plane_uv_to_world(self._cab_snap_pt_uv)
+            self._cab_snap_pt_actor = self.plotter.add_mesh(
+                pv.Sphere(radius=self.scene_diag * 0.006, center=snap_world),
+                color="white", name="cab_snap_pt", reset_camera=False,
+            )
+
+        if self._cab_split_axis == "u":
+            # Vertical split line: drops from bottom edge to top edge at split_u
+            split_u = float(np.clip(self._cab_split_u, umin + 1e-6, umax - 1e-6))
+            line_a = self._plane_uv_to_world(np.array([split_u, vmin]))
+            line_b = self._plane_uv_to_world(np.array([split_u, vmax]))
+            self._cab_split_actor = self.plotter.add_mesh(
+                pv.Line(line_a, line_b), color="white", line_width=3,
+                name="cab_split_line", reset_camera=False,
+            )
+            # Left sub-cuboid
+            lhu = 0.5 * (split_u - umin)
+            lhv = 0.5 * (vmax - vmin)
+            if lhu > 1e-9:
+                lc = self._plane_uv_to_world(np.array([0.5 * (umin + split_u), v_center]))
+                self._cab_left_cuboid = OrientedCuboid(
+                    center=lc + self.extrude_sign * half_n * n,
+                    rotation=np.column_stack([self.plane_u, self.plane_v, n]),
+                    extents=np.array([lhu, lhv, half_n], dtype=float),
+                )
+                self._cab_left_box_actor = self._draw_cuboid_wire(self._cab_left_cuboid, "orange", "cab_left_box")
+            # Right sub-cuboid
+            rhu = 0.5 * (umax - split_u)
+            if rhu > 1e-9:
+                rc = self._plane_uv_to_world(np.array([0.5 * (split_u + umax), v_center]))
+                self._cab_right_cuboid = OrientedCuboid(
+                    center=rc + self.extrude_sign * half_n * n,
+                    rotation=np.column_stack([self.plane_u, self.plane_v, n]),
+                    extents=np.array([rhu, lhv, half_n], dtype=float),
+                )
+                self._cab_right_box_actor = self._draw_cuboid_wire(self._cab_right_cuboid, "cyan", "cab_right_box")
+
+        else:  # axis == "v"
+            # Horizontal split line: runs left to right at split_v
+            split_v = float(np.clip(self._cab_split_v, vmin + 1e-6, vmax - 1e-6))
+            line_a = self._plane_uv_to_world(np.array([umin, split_v]))
+            line_b = self._plane_uv_to_world(np.array([umax, split_v]))
+            self._cab_split_actor = self.plotter.add_mesh(
+                pv.Line(line_a, line_b), color="white", line_width=3,
+                name="cab_split_line", reset_camera=False,
+            )
+            full_hu = 0.5 * (umax - umin)
+            # Bottom sub-cuboid ("left")
+            bhv = 0.5 * (split_v - vmin)
+            if bhv > 1e-9:
+                bc = self._plane_uv_to_world(np.array([u_center, 0.5 * (vmin + split_v)]))
+                self._cab_left_cuboid = OrientedCuboid(
+                    center=bc + self.extrude_sign * half_n * n,
+                    rotation=np.column_stack([self.plane_u, self.plane_v, n]),
+                    extents=np.array([full_hu, bhv, half_n], dtype=float),
+                )
+                self._cab_left_box_actor = self._draw_cuboid_wire(self._cab_left_cuboid, "orange", "cab_left_box")
+            # Top sub-cuboid ("right")
+            thv = 0.5 * (vmax - split_v)
+            if thv > 1e-9:
+                tc = self._plane_uv_to_world(np.array([u_center, 0.5 * (split_v + vmax)]))
+                self._cab_right_cuboid = OrientedCuboid(
+                    center=tc + self.extrude_sign * half_n * n,
+                    rotation=np.column_stack([self.plane_u, self.plane_v, n]),
+                    extents=np.array([full_hu, thv, half_n], dtype=float),
+                )
+                self._cab_right_box_actor = self._draw_cuboid_wire(self._cab_right_cuboid, "cyan", "cab_right_box")
+
+    def _cab_enter_split_mode(self) -> None:
+        self._cab_state = "split"
+        self._cab_split_u = None
+        self._cab_split_v = None
+        self._cab_snap_pt_uv = None
+        self._cab_left_edge = None
+        self._cab_right_edge = None
+        self._cab_left_limits = None
+        self._cab_right_limits = None
+        for attr in ("_cab_left_edge_actor", "_cab_right_edge_actor"):
+            actor = getattr(self, attr)
+            if actor is not None:
+                self.plotter.remove_actor(actor)
+                setattr(self, attr, None)
+        self._btn_cab_left.setEnabled(False)
+        self._btn_cab_right.setEnabled(False)
+        self._btn_add_cabinet.setEnabled(False)
+        self._lbl_cab_edges.setText("Left: none  |  Right: none")
+        self._update_cabinet_preview()
+        self.plotter.render()
+        self._lbl_cab_step.setText("Step 2: Click a point on any face edge to set split line.")
+        self._set_status("Cabinet: click on a face edge — top/bottom = vertical split, left/right = horizontal.")
+
+    def _cab_side_label(self, side: str) -> str:
+        """Human label for a side, accounting for vertical vs horizontal split."""
+        if self._cab_split_axis == "v":
+            return "Bottom" if side == "left" else "Top"
+        return "Left" if side == "left" else "Right"
+
+    def _cab_arm_hinge(self, side: str) -> None:
+        self._cab_hinge_target = side
+        label = self._cab_side_label(side)
+        btn = self._btn_cab_left if side == "left" else self._btn_cab_right
+        btn.setText(f"→ click near {label} edge…")
+        self._lbl_cab_step.setText(f"Click near a {label} cuboid edge.")
+        self._set_status(f"Cabinet: click near the {label.lower()} sub-cuboid edge to set hinge.")
+
+    def _pick_cabinet_edge(self, side: str) -> None:
+        cuboid = self._cab_left_cuboid if side == "left" else self._cab_right_cuboid
+        if cuboid is None or self.last_pick_world is None:
+            self._set_status(f"[warn] Cabinet {side} cuboid not ready.")
+            return
+
+        half_u, half_v, half_n = cuboid.extents
+        corners_local = np.array([
+            [-half_u, -half_v, -half_n], [ half_u, -half_v, -half_n],
+            [ half_u,  half_v, -half_n], [-half_u,  half_v, -half_n],
+            [-half_u, -half_v,  half_n], [ half_u, -half_v,  half_n],
+            [ half_u,  half_v,  half_n], [-half_u,  half_v,  half_n],
+        ], dtype=float)
+        corners_world = cuboid.local_to_world(corners_local)
+        edge_pairs = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+        _depth_edges = {(0, 4), (1, 5), (2, 6), (3, 7)}
+        _DEPTH_BONUS = 0.35
+
+        click_uv = self._world_to_plane_uv(self.last_pick_world)
+        best_ep, best_dist = edge_pairs[0], float("inf")
+        for ep in edge_pairs:
+            p0_uv = self._world_to_plane_uv(corners_world[ep[0]])
+            p1_uv = self._world_to_plane_uv(corners_world[ep[1]])
+            seg_uv = p1_uv - p0_uv
+            sq = float(np.dot(seg_uv, seg_uv))
+            if sq > 1e-12:
+                t = float(np.clip(np.dot(click_uv - p0_uv, seg_uv) / sq, 0, 1))
+                proj_uv = p0_uv + t * seg_uv
+            else:
+                proj_uv = p0_uv
+            dist = float(np.linalg.norm(click_uv - proj_uv))
+            if ep in _depth_edges:
+                dist *= _DEPTH_BONUS
+            if dist < best_dist:
+                best_dist = dist
+                best_ep = ep
+
+        lower_ui = self._w_lower.value()
+        upper_ui = self._w_upper.value()
+        if lower_ui >= upper_ui:
+            self._set_status("[error] Lower limit must be strictly less than upper limit.")
+            return
+
+        limits = JointLimits(lower=np.deg2rad(lower_ui), upper=np.deg2rad(upper_ui), unit="rad")
+        edge = Edge(p0_world=corners_world[best_ep[0]], p1_world=corners_world[best_ep[1]])
+
+        if side == "left":
+            self._cab_left_edge = edge
+            self._cab_left_limits = limits
+            actor_attr = "_cab_left_edge_actor"
+            color = "lime"
+            name = "cab_left_edge"
+        else:
+            self._cab_right_edge = edge
+            self._cab_right_limits = limits
+            actor_attr = "_cab_right_edge_actor"
+            color = "yellow"
+            name = "cab_right_edge"
+
+        old = getattr(self, actor_attr)
+        if old is not None:
+            self.plotter.remove_actor(old)
+        setattr(self, actor_attr, self.plotter.add_mesh(
+            pv.Line(edge.p0_world, edge.p1_world),
+            color=color, line_width=8, name=name, reset_camera=False,
+        ))
+        self.plotter.render()
+
+        # Restore button text to reflect "set, click to reselect"
+        label = self._cab_side_label(side)
+        btn = self._btn_cab_left if side == "left" else self._btn_cab_right
+        btn.setText(f"✓ {label} Hinge (reselect)")
+
+        left_label  = self._cab_side_label("left")
+        right_label = self._cab_side_label("right")
+        left_str  = "set" if self._cab_left_edge  is not None else "none"
+        right_str = "set" if self._cab_right_edge is not None else "none"
+        self._lbl_cab_edges.setText(f"{left_label}: {left_str}  |  {right_label}: {right_str}")
+
+        if self._cab_left_edge is not None and self._cab_right_edge is not None:
+            self._btn_add_cabinet.setEnabled(True)
+            self._lbl_cab_step.setText("Ready — click 'Add Cabinet', or reselect a hinge above.")
+            self._set_status("Cabinet: both hinges set. Click 'Add Cabinet' or reselect a hinge.")
+        else:
+            other_label = right_label if side == "left" else left_label
+            other_btn = self._btn_cab_right if side == "left" else self._btn_cab_left
+            other_btn.setText(f"Select {other_label} Hinge")
+            self._set_status(f"Cabinet: {label.lower()} hinge set. Now select the {other_label.lower()} hinge.")
+
+    def _add_cabinet(self) -> None:
+        if self._cab_left_cuboid is None or self._cab_right_cuboid is None:
+            self._set_status("[warn] Cabinet cuboids not fully defined.")
+            return
+        if self._cab_left_edge is None or self._cab_right_edge is None:
+            self._set_status("[warn] Both hinges must be selected.")
+            return
+
+        existing = [e.cuboid for e in self._articulations if e.cuboid is not None]
+        try:
+            split_mesh_by_cuboid_clip(self.mesh_tm, self._cab_left_cuboid, existing_cuboids=existing)
+            split_mesh_by_cuboid_clip(
+                self.mesh_tm, self._cab_right_cuboid,
+                existing_cuboids=existing + [self._cab_left_cuboid],
+            )
+        except ValueError as exc:
+            self._set_status(f"[error] {exc}")
+            return
+
+        try:
+            res_l = split_mesh_by_cuboid_clip(self.mesh_tm, self._cab_left_cuboid)
+            left_mesh, _ = cut_cuboid_with_surface(
+                res_l.inside_mesh, self._cab_left_cuboid, clip_loops=res_l.clip_loops or None,
+            )
+            left_mesh.vertices = left_mesh.vertices - np.asarray(self._cab_left_edge.p0_world)
+
+            res_r = split_mesh_by_cuboid_clip(self.mesh_tm, self._cab_right_cuboid)
+            right_mesh, _ = cut_cuboid_with_surface(
+                res_r.inside_mesh, self._cab_right_cuboid, clip_loops=res_r.clip_loops or None,
+            )
+            right_mesh.vertices = right_mesh.vertices - np.asarray(self._cab_right_edge.p0_world)
+        except Exception as exc:
+            self._set_status(f"[error] mesh split: {exc}")
+            return
+
+        idx = len(self._articulations)
+        left_actor = self._draw_cuboid_wire(self._cab_left_cuboid, "lime", f"door_box_{idx}")
+        self._articulations.append(ArticulationEntry(
+            edge=self._cab_left_edge,
+            joint_type="revolute",
+            joint_limits=self._cab_left_limits,
+            door_mesh=left_mesh,
+            hinge_origin=np.asarray(self._cab_left_edge.p0_world, dtype=float),
+            cuboid=self._cab_left_cuboid,
+            box_actor=left_actor,
+        ))
+
+        right_actor = self._draw_cuboid_wire(self._cab_right_cuboid, "lime", f"door_box_{idx + 1}")
+        self._articulations.append(ArticulationEntry(
+            edge=self._cab_right_edge,
+            joint_type="revolute",
+            joint_limits=self._cab_right_limits,
+            door_mesh=right_mesh,
+            hinge_origin=np.asarray(self._cab_right_edge.p0_world, dtype=float),
+            cuboid=self._cab_right_cuboid,
+            box_actor=right_actor,
+        ))
+
+        self._lbl_doors.setText(f"Doors queued: {len(self._articulations)}")
+        self._set_status(
+            f"Cabinet added as doors {idx} & {idx + 1}. Reset face to add another."
+        )
+        self._reset_face()
+
+    def _reset_cabinet(self) -> None:
+        self._cab_split_u = None
+        self._cab_split_v = None
+        self._cab_split_axis = "u"
+        self._cab_snap_pt_uv = None
+        self._cab_left_cuboid = None
+        self._cab_right_cuboid = None
+        self._cab_left_edge = None
+        self._cab_right_edge = None
+        self._cab_left_limits = None
+        self._cab_right_limits = None
+        self._cab_state = "face"
+        self._cab_hinge_target = None
+        for attr in ("_cab_split_actor", "_cab_snap_pt_actor", "_cab_left_box_actor",
+                     "_cab_right_box_actor", "_cab_left_edge_actor", "_cab_right_edge_actor", "box_actor"):
+            actor = getattr(self, attr)
+            if actor is not None:
+                self.plotter.remove_actor(actor)
+                setattr(self, attr, None)
+        self._btn_cab_resplit.setEnabled(False)
+        self._btn_cab_left.setEnabled(False)
+        self._btn_cab_right.setEnabled(False)
+        self._btn_add_cabinet.setEnabled(False)
+        self._btn_cab_left.setText("Select Left Hinge")
+        self._btn_cab_right.setText("Select Right Hinge")
+        self._lbl_cab_edges.setText("Left: none  |  Right: none")
+        self._lbl_cab_step.setText("Step 1: Click twice to define face.")
+
+    # -----------------------------------------------------------------------
+    # Mode switching
+    # -----------------------------------------------------------------------
+
     def _on_mode_changed(self) -> None:
-        mode = "cuboid" if self._rb_cuboid.isChecked() else "cylinder"
+        if self._rb_cuboid.isChecked():
+            mode = "cuboid"
+        elif self._rb_cylinder.isChecked():
+            mode = "cylinder"
+        else:
+            mode = "cabinet"
         if mode == self._selection_mode:
             return
         self._selection_mode = mode
         self._reset_face()
+
         cuboid_mode = mode == "cuboid"
+        cyl_mode = mode == "cylinder"
+        cab_mode = mode == "cabinet"
+
         self._btn_hinge.setEnabled(cuboid_mode)
         self._btn_slider_j.setEnabled(cuboid_mode)
-        self._btn_axis.setEnabled(not cuboid_mode)
+        self._btn_axis.setEnabled(cyl_mode)
         self._btn_preview_door.setEnabled(cuboid_mode)
         self._btn_add_door.setEnabled(cuboid_mode)
-        self._btn_preview_cyl.setEnabled(not cuboid_mode)
-        self._btn_add_cyl.setEnabled(not cuboid_mode)
-        self._limits_grp.setVisible(True)
+        self._btn_preview_cyl.setEnabled(cyl_mode)
+        self._btn_add_cyl.setEnabled(cyl_mode)
+        self._limits_grp.setVisible(not cab_mode)
+        self._cabinet_grp.setVisible(cab_mode)
+
         if cuboid_mode:
             self._set_status("Click twice on the blue plane to define a face.")
-        else:
+        elif cyl_mode:
             self._w_lower.set_range(-360.0, 360.0)
             self._w_upper.set_range(-360.0, 360.0)
             self._lbl_limits_unit.setText("Revolute: values in degrees")
             self._set_status("Cylinder mode: click center, then perimeter point.")
+        else:
+            self._w_lower.set_range(-360.0, 360.0)
+            self._w_upper.set_range(-360.0, 360.0)
+            self._lbl_limits_unit.setText("Revolute: values in degrees")
+            self._limits_grp.setVisible(True)
+            self._set_status("Cabinet mode: click twice to define face, then click split line.")
 
     # -----------------------------------------------------------------------
     # Cylinder helpers
@@ -878,6 +1411,9 @@ class CuboidSelectorApp(QMainWindow):
         self.current_joint_limits = None
         self.last_pick_world = None
         self._staged_child_mesh = None
+        self._joint_armed = None
+        self._btn_hinge.setText("Select Hinge (Revolute)")
+        self._btn_slider_j.setText("Select Slider (Prismatic)")
         self._lbl_joint.setText("Joint: none  |  Edge: not selected")
 
         for attr in ("face_actor", "box_actor", "edge_actor"):
@@ -886,8 +1422,14 @@ class CuboidSelectorApp(QMainWindow):
                 self.plotter.remove_actor(actor)
                 setattr(self, attr, None)
 
+        if self._selection_mode == "cabinet":
+            self._reset_cabinet()
+
         self.plotter.render()
-        self._set_status("Face reset. Click twice on the blue plane to define a new face.")
+        if self._selection_mode == "cabinet":
+            self._set_status("Cabinet reset. Click twice to define a new face.")
+        else:
+            self._set_status("Face reset. Click twice on the blue plane to define a new face.")
 
     def _choose_edge_joint(self, joint_type: str) -> None:
         if self.current_cuboid is None:
@@ -897,7 +1439,10 @@ class CuboidSelectorApp(QMainWindow):
             self._set_status("[warn] Click near a cuboid edge first, then select joint type.")
             return
 
-        # Find nearest edge to last click
+        # Find nearest edge to last click using UV-projected distance.
+        # Depth edges (parallel to plane normal) project to a single UV point,
+        # so they're given a 0.35x bonus to make them win over face edges when
+        # clicking near a cuboid corner — which is the typical hinge location.
         half_u, half_v, half_n = self.current_cuboid.extents
         corners_local = np.array([
             [-half_u, -half_v, -half_n], [ half_u, -half_v, -half_n],
@@ -911,15 +1456,24 @@ class CuboidSelectorApp(QMainWindow):
             (4, 5), (5, 6), (6, 7), (7, 4),
             (0, 4), (1, 5), (2, 6), (3, 7),
         ]
+        _depth_edges = {(0, 4), (1, 5), (2, 6), (3, 7)}
+        _DEPTH_BONUS = 0.35
 
-        pick = self.last_pick_world
+        click_uv = self._world_to_plane_uv(self.last_pick_world)
         best_ep, best_dist = edge_pairs[0], float("inf")
         for ep in edge_pairs:
-            p0w, p1w = corners_world[ep[0]], corners_world[ep[1]]
-            seg = p1w - p0w
-            sq = float(np.dot(seg, seg))
-            t = float(np.clip(np.dot(pick - p0w, seg) / sq, 0, 1)) if sq > 1e-12 else 0.0
-            dist = float(np.linalg.norm(pick - (p0w + t * seg)))
+            p0_uv = self._world_to_plane_uv(corners_world[ep[0]])
+            p1_uv = self._world_to_plane_uv(corners_world[ep[1]])
+            seg_uv = p1_uv - p0_uv
+            sq = float(np.dot(seg_uv, seg_uv))
+            if sq > 1e-12:
+                t = float(np.clip(np.dot(click_uv - p0_uv, seg_uv) / sq, 0, 1))
+                proj_uv = p0_uv + t * seg_uv
+            else:
+                proj_uv = p0_uv
+            dist = float(np.linalg.norm(click_uv - proj_uv))
+            if ep in _depth_edges:
+                dist *= _DEPTH_BONUS
             if dist < best_dist:
                 best_dist = dist
                 best_ep = ep
@@ -957,20 +1511,39 @@ class CuboidSelectorApp(QMainWindow):
             edge_line, color="lime", line_width=8, name="edge_selection", reset_camera=False,
         )
         self.plotter.render()
+        if joint_type == "revolute":
+            self._btn_hinge.setText("✓ Hinge (reselect)")
+            self._btn_slider_j.setText("Select Slider (Prismatic)")
+        else:
+            self._btn_slider_j.setText("✓ Slider (reselect)")
+            self._btn_hinge.setText("Select Hinge (Revolute)")
         self._set_status(f"[{joint_type}] edge selected. Limits: {limits_str}")
 
     def _choose_hinge(self) -> None:
         self._w_lower.set_range(-360.0, 360.0)
         self._w_upper.set_range(-360.0, 360.0)
         self._lbl_limits_unit.setText("Revolute: values in degrees")
-        self._choose_edge_joint("revolute")
+        self._arm_joint("revolute")
 
     def _choose_slider(self) -> None:
         d = self.scene_diag
         self._w_lower.set_range(-2 * d, 2 * d)
         self._w_upper.set_range(-2 * d, 2 * d)
         self._lbl_limits_unit.setText("Prismatic: values in meters")
-        self._choose_edge_joint("prismatic")
+        self._arm_joint("prismatic")
+
+    def _arm_joint(self, joint_type: str) -> None:
+        if self.current_cuboid is None:
+            self._set_status("[warn] No cuboid defined yet.")
+            return
+        self._joint_armed = joint_type
+        if joint_type == "revolute":
+            self._btn_hinge.setText("→ click near edge…")
+            self._btn_slider_j.setText("Select Slider (Prismatic)")
+        else:
+            self._btn_slider_j.setText("→ click near edge…")
+            self._btn_hinge.setText("Select Hinge (Revolute)")
+        self._set_status(f"Armed {joint_type} joint — click near a cuboid edge.")
 
     def _print_current_cuboid(self) -> None:
         if self.current_cuboid is None:
