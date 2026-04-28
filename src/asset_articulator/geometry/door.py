@@ -222,6 +222,7 @@ def cut_cuboid_with_surface(
     cuboid: OrientedCuboid,
     normal_threshold: float = 0.25,
     clip_loops: list[np.ndarray] | None = None,
+    extrusion_axis: int | None = None,
 ) -> tuple[trimesh.Trimesh, np.ndarray]:
     """Build door geometry via boundary-loop extrusion.
 
@@ -255,7 +256,7 @@ def cut_cuboid_with_surface(
         Each element is an (N, 3) world-space vertex array.
     """
     # --- Thin axis and front direction (always needed for extrusion) ------
-    thin_axis = int(np.argmin(cuboid.extents))
+    thin_axis = extrusion_axis if extrusion_axis is not None else int(np.argmin(cuboid.extents))
     d = cuboid.rotation[:, thin_axis].copy()
     d = d / np.linalg.norm(d)
 

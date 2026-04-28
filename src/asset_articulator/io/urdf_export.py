@@ -83,6 +83,16 @@ def export_to_urdf(
         raise FileNotFoundError(f"Parent mesh STL not found: {parent_mesh_stl}")
     parent_mesh_rel = Path(os.path.relpath(parent_mesh_stl, start=urdf_dir)).as_posix()
 
+    # Colour palette: base gets grey, children cycle through these rgba strings
+    _CHILD_COLOURS = [
+        "0.72 0.45 0.20 1.0",  # warm wood
+        "0.25 0.55 0.80 1.0",  # steel blue
+        "0.30 0.70 0.40 1.0",  # sage green
+        "0.80 0.35 0.30 1.0",  # terracotta
+        "0.60 0.40 0.75 1.0",  # lavender
+        "0.85 0.65 0.20 1.0",  # amber
+    ]
+
     robot = ET.Element("robot", name="articulated_object")
 
     # Base link
@@ -91,6 +101,8 @@ def export_to_urdf(
     ET.SubElement(base_visual, "origin", xyz="0 0 0", rpy="0 0 0")
     base_geo = ET.SubElement(base_visual, "geometry")
     ET.SubElement(base_geo, "mesh", filename=parent_mesh_rel)
+    base_mat = ET.SubElement(base_visual, "material", name="base_material")
+    ET.SubElement(base_mat, "color", rgba="0.75 0.75 0.75 1.0")
 
     for i, spec in enumerate(articulations):
         child_stl = Path(spec.child_mesh_stl).resolve()
@@ -115,6 +127,8 @@ def export_to_urdf(
         ET.SubElement(child_visual, "origin", xyz="0 0 0", rpy="0 0 0")
         child_geo = ET.SubElement(child_visual, "geometry")
         ET.SubElement(child_geo, "mesh", filename=child_rel)
+        child_mat = ET.SubElement(child_visual, "material", name=f"child_material_{i}")
+        ET.SubElement(child_mat, "color", rgba=_CHILD_COLOURS[i % len(_CHILD_COLOURS)])
 
         # Joint
         joint = ET.SubElement(robot, "joint", name=joint_name, type=spec.joint_type)

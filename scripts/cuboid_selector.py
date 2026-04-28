@@ -256,6 +256,9 @@ class CuboidSelectorApp(QMainWindow):
 
         self._staged_child_mesh: trimesh.Trimesh | None = None
 
+        # Drawer state -----------------------------------------------------
+        self._drawer_open_face: str = "top"
+
         # Actors -----------------------------------------------------------
         self.mesh_actor = None
         self.plane_actor = None
@@ -402,6 +405,9 @@ class CuboidSelectorApp(QMainWindow):
         btn_flip = QPushButton("Flip Extrusion Direction")
         btn_flip.clicked.connect(self._flip_extrusion_direction)
         cuboid_lay.addWidget(btn_flip)
+
+        self._chk_drawer = QCheckBox("Drawer (prismatic → box mesh; open face from edge click)")
+        cuboid_lay.addWidget(self._chk_drawer)
         pl.addWidget(cuboid_grp)
 
         # ---- Joint ----
@@ -443,28 +449,22 @@ class CuboidSelectorApp(QMainWindow):
         # ---- Actions ----
         actions_grp = QGroupBox("Actions")
         actions_lay = QVBoxLayout(actions_grp)
-        btn_reset     = QPushButton("Reset Face Selection")
-        self._btn_preview_door = QPushButton("Preview Door")
-        self._btn_add_door     = QPushButton("Add Door")
-        self._btn_preview_cyl  = QPushButton("Preview Cylinder")
-        self._btn_add_cyl      = QPushButton("Add Cylinder")
-        btn_clear     = QPushButton("Clear All Selections")
-        btn_urdf      = QPushButton("Export URDF")
-        btn_print     = QPushButton("Print Cuboid Info")
+        btn_reset = QPushButton("Reset Face Selection")
+        self._btn_add_door = QPushButton("Add Door / Drawer")
+        self._btn_add_cyl  = QPushButton("Add Cylinder")
+        btn_clear  = QPushButton("Clear All Selections")
+        btn_urdf   = QPushButton("Export URDF")
+        btn_print  = QPushButton("Print Cuboid Info")
         btn_reset.clicked.connect(self._reset_face)
-        self._btn_preview_door.clicked.connect(self._apply_door)
         self._btn_add_door.clicked.connect(self._add_door)
-        self._btn_preview_cyl.clicked.connect(self._apply_cylinder)
         self._btn_add_cyl.clicked.connect(self._add_cylinder)
-        self._btn_preview_cyl.setEnabled(False)
         self._btn_add_cyl.setEnabled(False)
         btn_clear.clicked.connect(self._clear_doors)
         btn_urdf.clicked.connect(self._create_urdf_file)
         btn_print.clicked.connect(self._print_current_cuboid)
         self._chk_slice_only = QCheckBox("Slice only (export single combined mesh)")
         self._lbl_doors = QLabel("Doors queued: 0")
-        for b in (btn_reset, self._btn_preview_door, self._btn_add_door,
-                  self._btn_preview_cyl, self._btn_add_cyl,
+        for b in (btn_reset, self._btn_add_door, self._btn_add_cyl,
                   btn_clear, btn_urdf, btn_print):
             actions_lay.addWidget(b)
         actions_lay.addWidget(self._chk_slice_only)
@@ -540,7 +540,7 @@ class CuboidSelectorApp(QMainWindow):
         self._xray_on = False
         self.mesh_actor = self.plotter.add_mesh(
             self.mesh_pv, color="lightgray", opacity=1.0,
-            show_edges=False, name="object_mesh", pickable=False,
+            show_edges=False, name="object_mesh", pickable=True,
         )
         self._wire_actor = self.plotter.add_mesh(
             self.mesh_pv, color="#555555", style="wireframe",
@@ -1283,15 +1283,13 @@ class CuboidSelectorApp(QMainWindow):
         self._reset_face()
 
         cuboid_mode = mode == "cuboid"
-        cyl_mode = mode == "cylinder"
-        cab_mode = mode == "cabinet"
+        cyl_mode    = mode == "cylinder"
+        cab_mode    = mode == "cabinet"
 
         self._btn_hinge.setEnabled(cuboid_mode)
         self._btn_slider_j.setEnabled(cuboid_mode)
         self._btn_axis.setEnabled(cyl_mode)
-        self._btn_preview_door.setEnabled(cuboid_mode)
         self._btn_add_door.setEnabled(cuboid_mode)
-        self._btn_preview_cyl.setEnabled(cyl_mode)
         self._btn_add_cyl.setEnabled(cyl_mode)
         self._limits_grp.setVisible(not cab_mode)
         self._cabinet_grp.setVisible(cab_mode)
@@ -1490,24 +1488,20 @@ class CuboidSelectorApp(QMainWindow):
             (4, 5), (5, 6), (6, 7), (7, 4),
             (0, 4), (1, 5), (2, 6), (3, 7),
         ]
-        _depth_edges = {(0, 4), (1, 5), (2, 6), (3, 7)}
-        _DEPTH_BONUS = 0.35
 
-        click_uv = self._world_to_plane_uv(self.last_pick_world)
+        click_world = self.last_pick_world
         best_ep, best_dist = edge_pairs[0], float("inf")
         for ep in edge_pairs:
-            p0_uv = self._world_to_plane_uv(corners_world[ep[0]])
-            p1_uv = self._world_to_plane_uv(corners_world[ep[1]])
-            seg_uv = p1_uv - p0_uv
-            sq = float(np.dot(seg_uv, seg_uv))
+            p0 = corners_world[ep[0]]
+            p1 = corners_world[ep[1]]
+            seg = p1 - p0
+            sq = float(np.dot(seg, seg))
             if sq > 1e-12:
-                t = float(np.clip(np.dot(click_uv - p0_uv, seg_uv) / sq, 0, 1))
-                proj_uv = p0_uv + t * seg_uv
+                t = float(np.clip(np.dot(click_world - p0, seg) / sq, 0, 1))
+                closest = p0 + t * seg
             else:
-                proj_uv = p0_uv
-            dist = float(np.linalg.norm(click_uv - proj_uv))
-            if ep in _depth_edges:
-                dist *= _DEPTH_BONUS
+                closest = p0
+            dist = float(np.linalg.norm(click_world - closest))
             if dist < best_dist:
                 best_dist = dist
                 best_ep = ep
@@ -1531,7 +1525,23 @@ class CuboidSelectorApp(QMainWindow):
             unit = "m"
             limits_str = f"[{lower:.4f} m, {upper:.4f} m]"
 
-        edge = Edge(p0_world=corners_world[best_ep[0]], p1_world=corners_world[best_ep[1]])
+        e_p0 = corners_world[best_ep[0]]
+        e_p1 = corners_world[best_ep[1]]
+
+        if self._chk_drawer.isChecked() and joint_type == "prismatic":
+            # Infer open face from local midpoint of the selected edge.
+            # Normalize by extents → [-1, 1]; largest UV component wins.
+            half_u, half_v, _ = self.current_cuboid.extents
+            mid_local = 0.5 * (corners_local[best_ep[0]] + corners_local[best_ep[1]])
+            nu = mid_local[0] / half_u
+            nv = mid_local[1] / half_v
+            if abs(nv) >= abs(nu):
+                self._drawer_open_face = "top" if nv > 0 else "bottom"
+            else:
+                self._drawer_open_face = "right" if nu > 0 else "left"
+
+        edge = Edge(p0_world=e_p0, p1_world=e_p1)
+
         self.current_edge = edge
         self.current_joint_type = joint_type
         self.current_joint_limits = JointLimits(lower=lower, upper=upper, unit=unit)
@@ -1540,9 +1550,10 @@ class CuboidSelectorApp(QMainWindow):
 
         if self.edge_actor is not None:
             self.plotter.remove_actor(self.edge_actor)
-        edge_line = pv.Line(edge.p0_world, edge.p1_world)
+        # Always show the actual selected cuboid edge in green.
         self.edge_actor = self.plotter.add_mesh(
-            edge_line, color="lime", line_width=8, name="edge_selection", reset_camera=False,
+            pv.Line(e_p0, e_p1), color="lime", line_width=8,
+            name="edge_selection", reset_camera=False,
         )
         self.plotter.render()
         if joint_type == "revolute":
@@ -1551,7 +1562,12 @@ class CuboidSelectorApp(QMainWindow):
         else:
             self._btn_slider_j.setText("✓ Slider (reselect)")
             self._btn_hinge.setText("Select Hinge (Revolute)")
-        self._set_status(f"[{joint_type}] edge selected. Limits: {limits_str}")
+        if self._chk_drawer.isChecked() and joint_type == "prismatic":
+            self._set_status(
+                f"[drawer] open: {self._drawer_open_face}  |  Limits: {limits_str}"
+            )
+        else:
+            self._set_status(f"[{joint_type}] edge selected. Limits: {limits_str}")
 
     def _choose_hinge(self) -> None:
         self._w_lower.set_range(-360.0, 360.0)
@@ -1563,7 +1579,12 @@ class CuboidSelectorApp(QMainWindow):
         d = self.scene_diag
         self._w_lower.set_range(-2 * d, 2 * d)
         self._w_upper.set_range(-2 * d, 2 * d)
-        self._lbl_limits_unit.setText("Prismatic: values in meters")
+        if self._chk_drawer.isChecked():
+            self._w_lower.set_value(0.0)
+            self._w_upper.set_value(self.depth)
+            self._lbl_limits_unit.setText("Drawer: slide distance in meters — click near face edge to set open side")
+        else:
+            self._lbl_limits_unit.setText("Prismatic: values in meters")
         self._arm_joint("prismatic")
 
     def _arm_joint(self, joint_type: str) -> None:
@@ -1626,6 +1647,39 @@ class CuboidSelectorApp(QMainWindow):
         if self.current_edge is None:
             self._set_status("[warn] Select joint type first.")
             return
+
+        if self._chk_drawer.isChecked() and self.current_joint_type == "prismatic":
+            try:
+                result = split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid)
+                hinge = np.asarray(self.current_edge.p0_world, dtype=float)
+                # Use the exact same logic as door: extrude boundary loop to back plane.
+                # Force axis=2 (the depth/n axis) so thin_axis detection can't pick
+                # a face axis when depth > face dimensions.
+                full_mesh, _ = cut_cuboid_with_surface(
+                    result.inside_mesh, self.current_cuboid,
+                    clip_loops=result.clip_loops or None,
+                    extrusion_axis=2,
+                )
+                # Remove the open-face side wall: faces whose outward normal aligns
+                # strongly with the open-face direction.
+                open_dir = self._open_face_normal()
+                dots = full_mesh.face_normals @ open_dir
+                keep = dots < 0.7
+                drawer_mesh = trimesh.Trimesh(
+                    vertices=full_mesh.vertices,
+                    faces=full_mesh.faces[keep],
+                    process=True,
+                )
+                trimesh.repair.fix_normals(drawer_mesh)
+                drawer_mesh.vertices = drawer_mesh.vertices - hinge
+                self._staged_child_mesh = drawer_mesh
+                self._set_status(
+                    f"Drawer — {len(drawer_mesh.faces)} faces, open: {self._drawer_open_face}."
+                )
+            except Exception as exc:
+                self._set_status(f"[error] drawer: {exc}")
+            return
+
         try:
             result = split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid)
             hinge = np.asarray(self.current_edge.p0_world, dtype=float)
@@ -1635,10 +1689,7 @@ class CuboidSelectorApp(QMainWindow):
             )
             door_mesh.vertices = door_mesh.vertices - hinge
             self._staged_child_mesh = door_mesh
-            self._set_status(
-                f"Door preview — {len(door_mesh.faces)} faces. "
-                f"Click 'Add Door' to queue it."
-            )
+            self._set_status(f"Door — {len(door_mesh.faces)} faces.")
         except Exception as exc:
             self._set_status(f"[error] door: {exc}")
 
@@ -1748,11 +1799,13 @@ class CuboidSelectorApp(QMainWindow):
         )
         self._articulations.append(entry)
         self._lbl_doors.setText(f"Doors queued: {len(self._articulations)}")
+        kind = f"drawer (open: {self._drawer_open_face})" \
+            if (self._chk_drawer.isChecked() and self.current_joint_type == "prismatic") \
+            else "door"
         self._set_status(
-            f"Door {len(self._articulations) - 1} added "
+            f"{kind.capitalize()} {len(self._articulations) - 1} added "
             f"({len(self._staged_child_mesh.faces)} faces). Reset face to add another."
         )
-        # Clear current selection so user can start a new one
         self._reset_face()
 
     def _clear_doors(self) -> None:
@@ -1828,6 +1881,21 @@ class CuboidSelectorApp(QMainWindow):
             self._set_status(f"[error] URDF export: {exc}")
 
     # -----------------------------------------------------------------------
+    # Drawer helpers
+    # -----------------------------------------------------------------------
+
+    def _open_face_normal(self) -> np.ndarray:
+        """World-space unit normal pointing outward through the open face of the drawer."""
+        face_map = {
+            "top":    self.plane_v,
+            "bottom": -self.plane_v,
+            "right":  self.plane_u,
+            "left":   -self.plane_u,
+        }
+        vec = face_map.get(self._drawer_open_face, self.plane_v)
+        return vec / np.linalg.norm(vec)
+
+    # -----------------------------------------------------------------------
     # Status helper
     # -----------------------------------------------------------------------
 
@@ -1850,7 +1918,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/microwave.stl")
+    window = CuboidSelectorApp("data/input/fancy_drawer.stl")
     window.run()
     sys.exit(app.exec_())
 
