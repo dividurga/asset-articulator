@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import itertools
 from pathlib import Path
 from dataclasses import dataclass
 import numpy as np
@@ -536,9 +537,31 @@ class CuboidSelectorApp(QMainWindow):
     # -----------------------------------------------------------------------
 
     def _build_scene(self) -> None:
+        self._xray_on = False
         self.mesh_actor = self.plotter.add_mesh(
             self.mesh_pv, color="lightgray", opacity=1.0,
             show_edges=False, name="object_mesh", pickable=False,
+        )
+        self._wire_actor = self.plotter.add_mesh(
+            self.mesh_pv, color="#555555", style="wireframe",
+            line_width=0.5, name="object_wire", pickable=False,
+        )
+        self._wire_actor.SetVisibility(False)
+
+        def _toggle_xray(state: bool) -> None:
+            self._xray_on = state
+            self.mesh_actor.GetProperty().SetOpacity(0.15 if state else 1.0)
+            self._wire_actor.SetVisibility(state)
+            self.plotter.render()
+
+        self.plotter.add_checkbox_button_widget(
+            _toggle_xray,
+            value=False,
+            position=(10, self.plotter.window_size[1] - 50),
+            size=30,
+            border_size=2,
+            color_on="#9b59d0",
+            color_off="#aaaaaa",
         )
         self.plotter.enable_surface_point_picking(
             callback=self._on_pick,
@@ -624,7 +647,18 @@ class CuboidSelectorApp(QMainWindow):
     # -----------------------------------------------------------------------
 
     def _make_plane_mesh(self) -> pv.PolyData:
-        hu, hv = self.plane_size_u, self.plane_size_v
+        # Project all 8 AABB corners onto current plane axes so the visual
+        # always covers the full mesh regardless of plane orientation.
+        bbox_corners = np.array(list(itertools.product(
+            [self.bounds_min[0], self.bounds_max[0]],
+            [self.bounds_min[1], self.bounds_max[1]],
+            [self.bounds_min[2], self.bounds_max[2]],
+        )))
+        proj_u = (bbox_corners - self.plane_origin) @ self.plane_u
+        proj_v = (bbox_corners - self.plane_origin) @ self.plane_v
+        margin = 0.05 * self.scene_diag
+        hu = max(abs(proj_u).max() + margin, 1e-3)
+        hv = max(abs(proj_v).max() + margin, 1e-3)
         corners = np.array([
             self.plane_origin - hu*self.plane_u - hv*self.plane_v,
             self.plane_origin + hu*self.plane_u - hv*self.plane_v,
@@ -1816,7 +1850,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/kitchen.stl")
+    window = CuboidSelectorApp("data/input/microwave.stl")
     window.run()
     sys.exit(app.exec_())
 

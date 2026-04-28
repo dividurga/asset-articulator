@@ -1,20 +1,11 @@
 <?xml version="1.0" ?>
 <robot name="articulated_object">
-  <material name="color_base"><color rgba="0.8 0.8 0.8 1.0"/></material>
-  <material name="color_0"><color rgba="1.0 0.2 0.2 1.0"/></material>
-  <material name="color_1"><color rgba="0.2 0.85 0.2 1.0"/></material>
-  <material name="color_2"><color rgba="0.2 0.4 1.0 1.0"/></material>
-  <material name="color_3"><color rgba="1.0 0.85 0.0 1.0"/></material>
-  <material name="color_4"><color rgba="1.0 0.4 0.0 1.0"/></material>
-  <material name="color_5"><color rgba="0.85 0.0 1.0 1.0"/></material>
-  <material name="color_6"><color rgba="0.0 0.9 0.9 1.0"/></material>
   <link name="base">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
         <mesh filename="base.stl"/>
       </geometry>
-      <material name="color_base"/>
     </visual>
   </link>
   <link name="door_0">
@@ -23,110 +14,13 @@
       <geometry>
         <mesh filename="door_0.stl"/>
       </geometry>
-      <material name="color_0"/>
     </visual>
   </link>
   <joint name="joint_0" type="revolute">
     <parent link="base"/>
     <child link="door_0"/>
-    <origin xyz="0.72587861 3.34588627 0.06155931" rpy="0 0 0"/>
-    <axis xyz="0.80942715 -0.58722031 0.00000000"/>
-    <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
-  </joint>
-  <link name="door_1">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="door_1.stl"/>
-      </geometry>
-      <material name="color_1"/>
-    </visual>
-  </link>
-  <joint name="joint_1" type="revolute">
-    <parent link="base"/>
-    <child link="door_1"/>
-    <origin xyz="1.24694521 3.42703056 2.22879387" rpy="0 0 0"/>
+    <origin xyz="1.11697522 -0.71617644 1.83723763" rpy="0 0 0"/>
     <axis xyz="0.00000000 0.00000000 -1.00000000"/>
-    <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
-  </joint>
-  <link name="door_2">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="door_2.stl"/>
-      </geometry>
-      <material name="color_2"/>
-    </visual>
-  </link>
-  <joint name="joint_2" type="revolute">
-    <parent link="base"/>
-    <child link="door_2"/>
-    <origin xyz="1.95692207 2.91195909 1.32162002" rpy="0 0 0"/>
-    <axis xyz="0.00000000 0.00000000 1.00000000"/>
-    <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
-  </joint>
-  <link name="door_3">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="door_3.stl"/>
-      </geometry>
-      <material name="color_3"/>
-    </visual>
-  </link>
-  <joint name="joint_3" type="revolute">
-    <parent link="base"/>
-    <child link="door_3"/>
-    <origin xyz="1.23535171 0.69724409 -0.25977094" rpy="0 0 0"/>
-    <axis xyz="0.00000000 0.00000000 1.00000000"/>
-    <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
-  </joint>
-  <link name="door_4">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="door_4.stl"/>
-      </geometry>
-      <material name="color_4"/>
-    </visual>
-  </link>
-  <joint name="joint_4" type="revolute">
-    <parent link="base"/>
-    <child link="door_4"/>
-    <origin xyz="1.23535171 0.69724409 0.87685460" rpy="0 0 0"/>
-    <axis xyz="0.00000000 0.00000000 1.00000000"/>
-    <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
-  </joint>
-  <link name="door_5">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="door_5.stl"/>
-      </geometry>
-      <material name="color_5"/>
-    </visual>
-  </link>
-  <joint name="joint_5" type="revolute">
-    <parent link="base"/>
-    <child link="door_5"/>
-    <origin xyz="3.00276059 2.03885339 1.47078759" rpy="0 0 0"/>
-    <axis xyz="0.00000000 0.00000000 -1.00000000"/>
-    <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
-  </joint>
-  <link name="door_6">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="door_6.stl"/>
-      </geometry>
-      <material name="color_6"/>
-    </visual>
-  </link>
-  <joint name="joint_6" type="revolute">
-    <parent link="base"/>
-    <child link="door_6"/>
-    <origin xyz="2.48276147 1.35921457 1.06113375" rpy="0 0 0"/>
-    <axis xyz="0.00000000 0.00000000 1.00000000"/>
     <limit lower="0.0" upper="1.3089969389957472" effort="100.0" velocity="1.0"/>
   </joint>
 </robot>
