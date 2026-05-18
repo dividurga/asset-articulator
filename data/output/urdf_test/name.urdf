@@ -25,9 +25,9 @@
   <joint name="joint_0" type="prismatic">
     <parent link="base"/>
     <child link="door_0"/>
-    <origin xyz="-4.81574610 -1.88207018 3.97006284" rpy="0 0 0"/>
-    <axis xyz="-0.00000000 1.00000000 0.00000000"/>
-    <limit lower="0.0" upper="7.347" effort="100.0" velocity="1.0"/>
+    <origin xyz="-4.81113793 -1.09300743 5.83019529" rpy="0 0 0"/>
+    <axis xyz="0.00000000 1.00000000 0.00000000"/>
+    <limit lower="0.0" upper="7.229" effort="100.0" velocity="1.0"/>
   </joint>
   <link name="door_1">
     <visual>
@@ -40,11 +40,11 @@
       </material>
     </visual>
   </link>
-  <joint name="joint_1" type="prismatic">
+  <joint name="joint_1" type="revolute">
     <parent link="base"/>
     <child link="door_1"/>
-    <origin xyz="-4.78927802 -1.88207018 5.91022464" rpy="0 0 0"/>
-    <axis xyz="-0.00000000 1.00000000 0.00000000"/>
-    <limit lower="0.0" upper="7.347" effort="100.0" velocity="1.0"/>
+    <origin xyz="-4.77848371 2.38260326 7.44879069" rpy="0 0 0"/>
+    <axis xyz="0.00000000 0.00000000 1.00000000"/>
+    <limit lower="0.0" upper="0.12616985162667008" effort="100.0" velocity="1.0"/>
   </joint>
 </robot>

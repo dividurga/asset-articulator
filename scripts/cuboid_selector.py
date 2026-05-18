@@ -1867,7 +1867,7 @@ class CuboidSelectorApp(QMainWindow):
                     link_name=f"door_{i}",
                 ))
 
-            urdf_path = export_dir / "name.urdf"
+            urdf_path = export_dir / f"{self.mesh_path.stem}.urdf"
             export_to_urdf(
                 urdf_path=urdf_path,
                 parent_mesh_stl=base_stl,
@@ -1918,7 +1918,7 @@ class CuboidSelectorApp(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/fancy_drawer.stl")
+    window = CuboidSelectorApp("data/input/drawer_small.stl")
     window.run()
     sys.exit(app.exec_())
 
