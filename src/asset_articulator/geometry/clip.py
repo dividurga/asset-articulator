@@ -1,7 +1,8 @@
+"""Sutherland-Hodgman polygon clipping for mesh selection."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 import numpy.typing as npt
@@ -9,7 +10,6 @@ import trimesh
 
 from asset_articulator.geometry.cuboid import OrientedCuboid
 from asset_articulator.geometry.cylinder import OrientedCylinder
-
 
 ArrayF = npt.NDArray[np.float64]
 
@@ -19,6 +19,8 @@ _EPS = 1e-9
 
 @dataclass
 class MeshClipResult:
+    """Result of clipping a mesh with an oriented cuboid or cylinder."""
+
     inside_mesh: trimesh.Trimesh
     outside_mesh: trimesh.Trimesh
     clip_loops: list[ArrayF]  # directed boundary loops lying on the cuboid surface
@@ -78,9 +80,9 @@ def split_mesh_by_cuboid_clip(
                 )
 
     triangles_world = mesh.triangles
-    triangles_local = cuboid.world_to_local(
-        triangles_world.reshape(-1, 3)
-    ).reshape(-1, 3, 3)
+    triangles_local = cuboid.world_to_local(triangles_world.reshape(-1, 3)).reshape(
+        -1, 3, 3
+    )
 
     inside_triangles_local: list[ArrayF] = []
     outside_triangles_local: list[ArrayF] = []
@@ -117,14 +119,16 @@ def split_mesh_by_cuboid_clip(
             outside_triangles_local.extend(_triangulate_convex_polygon(poly))
 
     inside_mesh = _triangles_to_mesh(
-        cuboid.local_to_world(np.asarray(inside_triangles_local).reshape(-1, 3))
-        .reshape(-1, 3, 3)
+        cuboid.local_to_world(
+            np.asarray(inside_triangles_local).reshape(-1, 3)
+        ).reshape(-1, 3, 3)
         if inside_triangles_local
         else np.zeros((0, 3, 3), dtype=float)
     )
     outside_mesh = _triangles_to_mesh(
-        cuboid.local_to_world(np.asarray(outside_triangles_local).reshape(-1, 3))
-        .reshape(-1, 3, 3)
+        cuboid.local_to_world(
+            np.asarray(outside_triangles_local).reshape(-1, 3)
+        ).reshape(-1, 3, 3)
         if outside_triangles_local
         else np.zeros((0, 3, 3), dtype=float)
     )
@@ -148,10 +152,10 @@ def _drop_small_components(
 ) -> trimesh.Trimesh:
     """Remove disconnected components that are much smaller than the largest one.
 
-    A component is kept if its face count >= max(min_faces, min_ratio * largest).
-    With the default min_ratio=0.5%, a component must be at least 0.5% of the
-    largest component to survive — this kills slivers from near-coincident cuts
-    while preserving intentionally small geometry.
+    A component is kept if its face count >= max(min_faces, min_ratio * largest). With
+    the default min_ratio=0.5%, a component must be at least 0.5% of the largest
+    component to survive — this kills slivers from near-coincident cuts while preserving
+    intentionally small geometry.
     """
     if len(mesh.faces) == 0:
         return mesh
@@ -232,16 +236,14 @@ def _extract_clip_loops(
     clip_directed: list[tuple[int, int]] = [
         (int(a), int(b))
         for a, b in edges
-        if (int(b), int(a)) not in edge_set
-        and bool(on_face[a])
-        and bool(on_face[b])
+        if (int(b), int(a)) not in edge_set and bool(on_face[a]) and bool(on_face[b])
     ]
 
     if not clip_directed:
         return []
 
     # Build next-vertex map (assumes locally manifold boundary).
-    next_v: dict[int, int] = {a: b for a, b in clip_directed}
+    next_v: dict[int, int] = dict(clip_directed)
 
     visited: set[int] = set()
     loops: list[ArrayF] = []
@@ -257,7 +259,7 @@ def _extract_clip_loops(
             visited.add(cur)
             loop_idx.append(cur)
             cur = next_v.get(cur, -1)
-            if cur == -1 or cur == start:
+            if cur in (-1, start):
                 break
 
         if len(loop_idx) >= 3:
@@ -278,11 +280,11 @@ def _cuboid_planes(extents: ArrayF) -> list[tuple[int, float, bool]]:
     """
     ex, ey, ez = extents
     return [
-        (0, ex, True),    # x <= ex
+        (0, ex, True),  # x <= ex
         (0, -ex, False),  # x >= -ex
-        (1, ey, True),    # y <= ey
+        (1, ey, True),  # y <= ey
         (1, -ey, False),  # y >= -ey
-        (2, ez, True),    # z <= ez
+        (2, ez, True),  # z <= ez
         (2, -ez, False),  # z >= -ez
     ]
 
@@ -309,7 +311,6 @@ def _clip_polygon_halfspace(
     keep_less_equal: bool,
 ) -> ArrayF | None:
     """Clip a polygon against a single half-space using Sutherland-Hodgman."""
-    # this algorithm is so cool lol, I love it
     if len(poly) == 0:
         return None
 
@@ -430,6 +431,7 @@ def _triangles_to_mesh(triangles: ArrayF) -> trimesh.Trimesh:
 # Cylinder clipping
 # ---------------------------------------------------------------------------
 
+
 def _clip_polygon_by_halfplane(
     poly: ArrayF,
     normal: ArrayF,
@@ -449,12 +451,20 @@ def _clip_polygon_by_halfplane(
         if curr_ok:
             if not prev_ok:
                 denom = curr_d - prev_d
-                t = float(np.clip((bound - prev_d) / denom, 0.0, 1.0)) if abs(denom) > _EPS else 0.0
+                t = (
+                    float(np.clip((bound - prev_d) / denom, 0.0, 1.0))
+                    if abs(denom) > _EPS
+                    else 0.0
+                )
                 output.append(prev + t * (curr - prev))
             output.append(curr.copy())
         elif prev_ok:
             denom = curr_d - prev_d
-            t = float(np.clip((bound - prev_d) / denom, 0.0, 1.0)) if abs(denom) > _EPS else 0.0
+            t = (
+                float(np.clip((bound - prev_d) / denom, 0.0, 1.0))
+                if abs(denom) > _EPS
+                else 0.0
+            )
             output.append(prev + t * (curr - prev))
 
         prev, prev_d, prev_ok = curr, curr_d, curr_ok
@@ -496,9 +506,9 @@ def split_mesh_by_cylinder_clip(
         raise ValueError("Input mesh has no faces.")
 
     triangles_world = mesh.triangles
-    triangles_local = cylinder.world_to_local(
-        triangles_world.reshape(-1, 3)
-    ).reshape(-1, 3, 3)
+    triangles_local = cylinder.world_to_local(triangles_world.reshape(-1, 3)).reshape(
+        -1, 3, 3
+    )
 
     h = cylinder.half_height
     r = cylinder.radius
@@ -506,7 +516,7 @@ def split_mesh_by_cylinder_clip(
 
     # Flat cap planes (z ≤ h  and  -z ≤ h) + N circumscribed radial planes
     planes: list[tuple[ArrayF, float]] = [
-        (np.array([0.0, 0.0,  1.0]), h),
+        (np.array([0.0, 0.0, 1.0]), h),
         (np.array([0.0, 0.0, -1.0]), h),
     ]
     for a in angles:
@@ -540,7 +550,9 @@ def split_mesh_by_cylinder_clip(
     def _to_world(tris: list[ArrayF]) -> ArrayF:
         if not tris:
             return np.zeros((0, 3, 3), dtype=float)
-        return cylinder.local_to_world(np.asarray(tris).reshape(-1, 3)).reshape(-1, 3, 3)
+        return cylinder.local_to_world(np.asarray(tris).reshape(-1, 3)).reshape(
+            -1, 3, 3
+        )
 
     inside_mesh = _triangles_to_mesh(_to_world(inside_tris))
     outside_mesh = _triangles_to_mesh(_to_world(outside_tris))
@@ -563,8 +575,8 @@ def _extract_cylinder_clip_loops(
 ) -> list[ArrayF]:
     """Extract directed boundary loops lying on the cylinder's flat cap planes.
 
-    Only edges where both endpoints sit at |z| ≈ half_height (in cylinder local
-    frame) are considered cut edges.
+    Only edges where both endpoints sit at |z| ≈ half_height (in cylinder local frame)
+    are considered cut edges.
     """
     if len(inside_mesh.faces) == 0:
         return []
@@ -579,22 +591,22 @@ def _extract_cylinder_clip_loops(
     verts_local = cylinder.world_to_local(merged.vertices)
     tol = tol_factor * cylinder.half_height
 
-    on_cap: ArrayF = np.abs(np.abs(verts_local[:, 2]) - cylinder.half_height) < tol
+    on_cap: npt.NDArray[np.bool_] = (
+        np.abs(np.abs(verts_local[:, 2]) - cylinder.half_height) < tol
+    )
 
     edges = merged.edges
     edge_set = set(map(tuple, edges.tolist()))
     clip_directed: list[tuple[int, int]] = [
         (int(a), int(b))
         for a, b in edges
-        if (int(b), int(a)) not in edge_set
-        and bool(on_cap[a])
-        and bool(on_cap[b])
+        if (int(b), int(a)) not in edge_set and bool(on_cap[a]) and bool(on_cap[b])
     ]
 
     if not clip_directed:
         return []
 
-    next_v: dict[int, int] = {a: b for a, b in clip_directed}
+    next_v: dict[int, int] = dict(clip_directed)
     visited: set[int] = set()
     loops: list[ArrayF] = []
 
@@ -609,7 +621,7 @@ def _extract_cylinder_clip_loops(
             visited.add(cur)
             loop_idx.append(cur)
             cur = next_v.get(cur, -1)
-            if cur == -1 or cur == start:
+            if cur in (-1, start):
                 break
         if len(loop_idx) >= 3:
             loops.append(merged.vertices[loop_idx].copy())

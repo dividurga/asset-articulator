@@ -1,10 +1,12 @@
+"""URDF file export for articulated robot descriptions."""
+
 from __future__ import annotations
 
 import os
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from xml.dom import minidom
-import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -118,7 +120,9 @@ def export_to_urdf(
         axis = np.asarray(spec.edge.p1_world - spec.edge.p0_world, dtype=float)
         axis_norm = float(np.linalg.norm(axis))
         if axis_norm < 1e-6:
-            raise ValueError(f"Articulation {i}: edge is too short to define a valid axis.")
+            raise ValueError(
+                f"Articulation {i}: edge is too short to define a valid axis."
+            )
         axis = axis / axis_norm
 
         # Child link
@@ -138,7 +142,8 @@ def export_to_urdf(
         ET.SubElement(joint, "axis", xyz=_fmt(axis))
         if spec.joint_type != "continuous":
             ET.SubElement(
-                joint, "limit",
+                joint,
+                "limit",
                 lower=str(spec.joint_limits.lower),
                 upper=str(spec.joint_limits.upper),
                 effort="100.0",

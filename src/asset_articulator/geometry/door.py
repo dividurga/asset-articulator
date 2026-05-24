@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 
 import numpy as np
@@ -10,27 +11,35 @@ import trimesh
 from asset_articulator.geometry.cuboid import OrientedCuboid
 from asset_articulator.geometry.cylinder import OrientedCylinder
 
+_log = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
-# Clustering 
+# Clustering
 # ---------------------------------------------------------------------------
 
-def _connected_clusters(mesh: trimesh.Trimesh, face_indices: np.ndarray) -> list[np.ndarray]:
+
+def _connected_clusters(
+    mesh: trimesh.Trimesh, face_indices: np.ndarray
+) -> list[np.ndarray]:
     """Return connected components of face_indices using trimesh face adjacency.
 
-    Merges duplicate vertices first so adjacency works on STL-style meshes
-    where each triangle has its own unshared vertex copies.
+    Merges duplicate vertices first so adjacency works on STL-style meshes where each
+    triangle has its own unshared vertex copies.
     """
     selected_set = set(int(fi) for fi in face_indices)
 
     # Merge vertices so shared edges have matching indices
     merged = trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=True)
-    print(f"[door] clustering: original {len(mesh.vertices)} verts → merged {len(merged.vertices)} verts, "
-          f"face_adjacency pairs: {len(merged.face_adjacency)}")
+    _log.debug(
+        "[door] clustering: original %d verts → merged %d verts, face_adjacency pairs: %d",
+        len(mesh.vertices),
+        len(merged.vertices),
+        len(merged.face_adjacency),
+    )
 
     neighbors: dict[int, list[int]] = defaultdict(list)
-    # guess who remembers bfs
-    for a, b in merged.face_adjacency:
+    for a, b in merged.face_adjacency:  # pylint: disable=not-an-iterable
         a, b = int(a), int(b)
         if a in selected_set and b in selected_set:
             neighbors[a].append(b)
@@ -60,8 +69,10 @@ def _connected_clusters(mesh: trimesh.Trimesh, face_indices: np.ndarray) -> list
 # Boundary loop extraction
 # ---------------------------------------------------------------------------
 
-def _boundary_loops(cluster_face_indices: np.ndarray, mesh_vertices: np.ndarray,
-                    mesh_faces: np.ndarray) -> list[np.ndarray]:
+
+def _boundary_loops(
+    cluster_face_indices: np.ndarray, mesh_vertices: np.ndarray, mesh_faces: np.ndarray
+) -> list[np.ndarray]:
     """Return ordered boundary loops (as arrays of 3-D vertex positions).
 
     Steps
@@ -80,15 +91,21 @@ def _boundary_loops(cluster_face_indices: np.ndarray, mesh_vertices: np.ndarray,
         process=True,
     )
 
-    print(f"[door]   submesh (merged): {len(sub.vertices)} verts, {len(sub.faces)} faces")
+    _log.debug(
+        f"[door]   submesh (merged): {len(sub.vertices)} verts, {len(sub.faces)} faces"
+    )
 
     # All directed half-edges of the submesh
     edges = sub.edges  # shape (3 * n_faces, 2)
     edge_set = set(map(tuple, edges.tolist()))
 
     # A half-edge (a, b) is a boundary edge if (b, a) is absent
-    boundary_directed = [(int(a), int(b)) for a, b in edges if (int(b), int(a)) not in edge_set]
-    print(f"[door]   boundary directed edges: {len(boundary_directed)}")
+    boundary_directed = [
+        (int(a), int(b))
+        for a, b in edges  # pylint: disable=not-an-iterable
+        if (int(b), int(a)) not in edge_set
+    ]
+    _log.debug(f"[door]   boundary directed edges: {len(boundary_directed)}")
 
     if not boundary_directed:
         return []
@@ -112,12 +129,12 @@ def _boundary_loops(cluster_face_indices: np.ndarray, mesh_vertices: np.ndarray,
             visited_starts.add(cur)
             loop_idx.append(cur)
             cur = next_v.get(cur, -1)
-            if cur == -1 or cur == start:
+            if cur in (-1, start):
                 break
 
         if len(loop_idx) >= 3:
             loops.append(sub.vertices[loop_idx])
-            print(f"[door]   loop: {len(loop_idx)} vertices")
+            _log.debug(f"[door]   loop: {len(loop_idx)} vertices")
 
     return loops
 
@@ -126,8 +143,10 @@ def _boundary_loops(cluster_face_indices: np.ndarray, mesh_vertices: np.ndarray,
 # Extrusion
 # ---------------------------------------------------------------------------
 
-def _extrude_loops(loops: list[np.ndarray], back_origin: np.ndarray,
-                   d: np.ndarray) -> tuple[trimesh.Trimesh, np.ndarray]:
+
+def _extrude_loops(
+    loops: list[np.ndarray], back_origin: np.ndarray, d: np.ndarray
+) -> tuple[trimesh.Trimesh, np.ndarray]:
     """Extrude each boundary loop to the cuboid back plane.
 
     For each vertex v in the loop, the projected-back position is:
@@ -160,10 +179,9 @@ def _extrude_loops(loops: list[np.ndarray], back_origin: np.ndarray,
         n = len(loop_pts)
         front = loop_pts  # (n, 3)
 
-        back = np.array([
-            v - max(0.0, float(np.dot(v - back_origin, d))) * d
-            for v in front
-        ])  # (n, 3)
+        back = np.array(
+            [v - max(0.0, float(np.dot(v - back_origin, d))) * d for v in front]
+        )  # (n, 3)
 
         if n > largest_n:
             largest_n = n
@@ -201,21 +219,26 @@ def _extrude_loops(loops: list[np.ndarray], back_origin: np.ndarray,
     verts_all = np.vstack(all_verts)
     faces_all = np.vstack(all_faces)
     mesh = trimesh.Trimesh(vertices=verts_all, faces=faces_all, process=True)
-    trimesh.repair.fix_normals(mesh)
+    trimesh.repair.fix_normals(mesh)  # type: ignore[no-untyped-call]
 
     # Back perimeter edges of the chosen (largest) loop: back[i] → back[(i+1)%n]
     assert chosen_back is not None
     n = len(chosen_back)
-    back_perimeter_edges = np.stack([chosen_back, chosen_back[np.arange(1, n + 1) % n]], axis=1)  # (n, 2, 3)
+    back_perimeter_edges = np.stack(
+        [chosen_back, chosen_back[np.arange(1, n + 1) % n]], axis=1
+    )  # (n, 2, 3)
 
-    print(f"[door]   extrusion: {len(mesh.vertices)} verts, {len(mesh.faces)} faces  "
-          f"back_perimeter_edges={len(back_perimeter_edges)}")
+    _log.debug(
+        f"[door]   extrusion: {len(mesh.vertices)} verts, {len(mesh.faces)} faces  "
+        f"back_perimeter_edges={len(back_perimeter_edges)}"
+    )
     return mesh, back_perimeter_edges
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def cut_cuboid_with_surface(
     surface_mesh: trimesh.Trimesh,
@@ -256,38 +279,48 @@ def cut_cuboid_with_surface(
         Each element is an (N, 3) world-space vertex array.
     """
     # --- Thin axis and front direction (always needed for extrusion) ------
-    thin_axis = extrusion_axis if extrusion_axis is not None else int(np.argmin(cuboid.extents))
+    thin_axis = (
+        extrusion_axis if extrusion_axis is not None else int(np.argmin(cuboid.extents))
+    )
     d = cuboid.rotation[:, thin_axis].copy()
     d = d / np.linalg.norm(d)
 
     face_normals = surface_mesh.face_normals
     dot_pos = float((face_normals @ d).sum())
     dot_neg = float((face_normals @ (-d)).sum())
-    print(f"[door] thin_axis={thin_axis}  extents={cuboid.extents}")
-    print(f"[door] d (pre-flip)={d}  sum(n·d)={dot_pos:.3f}  sum(n·-d)={dot_neg:.3f}")
+    _log.debug(f"[door] thin_axis={thin_axis}  extents={cuboid.extents}")
+    _log.debug(
+        f"[door] d (pre-flip)={d}  sum(n·d)={dot_pos:.3f}  sum(n·-d)={dot_neg:.3f}"
+    )
     if dot_pos < dot_neg:
         d = -d
-        print(f"[door] flipped d → {d}")
+        _log.debug(f"[door] flipped d → {d}")
     else:
-        print(f"[door] d kept as-is")
+        _log.debug("[door] d kept as-is")
 
     back_origin = cuboid.center - cuboid.extents[thin_axis] * d
-    print(f"[door] back_origin={back_origin}")
+    _log.debug(f"[door] back_origin={back_origin}")
 
     # --- Loop source: clip-tracked or heuristic --------------------------
     if clip_loops is not None:
         loops = clip_loops
-        print(f"[door] using {len(loops)} pre-computed clip loop(s)")
+        _log.debug(f"[door] using {len(loops)} pre-computed clip loop(s)")
     else:
         # --- Normal-based selection --------------------------------------
         dots = face_normals @ d
-        print(f"[door] face normal·d  min={dots.min():.3f}  max={dots.max():.3f}  "
-              f"mean={dots.mean():.3f}  threshold={normal_threshold}")
+        _log.debug(
+            f"[door] face normal·d  min={dots.min():.3f}  max={dots.max():.3f}  "
+            f"mean={dots.mean():.3f}  threshold={normal_threshold}"
+        )
         selected = np.where(dots > normal_threshold)[0]
-        print(f"[door] selected faces: {len(selected)} / {len(surface_mesh.faces)}")
+        _log.debug(
+            f"[door] selected faces: {len(selected)} / {len(surface_mesh.faces)}"
+        )
 
         if len(selected) == 0:
-            print("[door] WARNING: no faces selected — returning surface mesh unchanged")
+            _log.debug(
+                "[door] WARNING: no faces selected — returning surface mesh unchanged"
+            )
             return trimesh.Trimesh(
                 vertices=surface_mesh.vertices.copy(),
                 faces=surface_mesh.faces.copy(),
@@ -296,18 +329,19 @@ def cut_cuboid_with_surface(
 
         # --- Cluster and pick --------------------------------------------
         clusters = _connected_clusters(surface_mesh, selected)
-        print(f"[door] clusters: {len(clusters)}  sizes: {sorted([len(c) for c in clusters], reverse=True)[:10]}")
+        top_sizes = sorted([len(c) for c in clusters], reverse=True)[:10]
+        _log.debug("[door] clusters: %d  sizes: %s", len(clusters), top_sizes)
 
         best_idx = int(np.argmax([len(c) for c in clusters]))
         best = clusters[best_idx]
-        print(f"[door] chosen cluster: idx={best_idx}  size={len(best)}")
+        _log.debug(f"[door] chosen cluster: idx={best_idx}  size={len(best)}")
 
         # --- Boundary loops ----------------------------------------------
         loops = _boundary_loops(best, surface_mesh.vertices, surface_mesh.faces)
-        print(f"[door] boundary loops found: {len(loops)}")
+        _log.debug(f"[door] boundary loops found: {len(loops)}")
 
     if not loops:
-        print("[door] WARNING: no loops — returning surface mesh unchanged")
+        _log.debug("[door] WARNING: no loops — returning surface mesh unchanged")
         return trimesh.Trimesh(
             vertices=surface_mesh.vertices.copy(),
             faces=surface_mesh.faces.copy(),
@@ -323,9 +357,11 @@ def cut_cuboid_with_surface(
         faces=combined.faces,
         process=True,
     )
-    trimesh.repair.fix_normals(result)
-    print(f"[door] final: {len(result.vertices)} verts, {len(result.faces)} faces  "
-          f"watertight={result.is_watertight}")
+    trimesh.repair.fix_normals(result)  # type: ignore[no-untyped-call]
+    _log.debug(
+        f"[door] final: {len(result.vertices)} verts, {len(result.faces)} faces  "
+        f"watertight={result.is_watertight}"
+    )
     return result, back_perimeter_edges
 
 
@@ -339,8 +375,8 @@ def cut_cylinder_with_surface(
     Identical workflow to ``cut_cuboid_with_surface`` but uses the cylinder axis
     directly as the extrusion direction instead of detecting a thin cuboid axis.
 
-    The flat-cap clip loops (from ``split_mesh_by_cylinder_clip``) are extruded
-    to the far cap, producing the closing geometry for the rotating piece.
+    The flat-cap clip loops (from ``split_mesh_by_cylinder_clip``) are extruded to the
+    far cap, producing the closing geometry for the rotating piece.
     """
     d = cylinder.axis.copy()
     face_normals = surface_mesh.face_normals
@@ -352,7 +388,9 @@ def cut_cylinder_with_surface(
     back_origin = cylinder.center - cylinder.half_height * d
 
     if not clip_loops:
-        print("[door/cyl] WARNING: no clip_loops — returning surface mesh unchanged")
+        _log.debug(
+            "[door/cyl] WARNING: no clip_loops — returning surface mesh unchanged"
+        )
         return trimesh.Trimesh(
             vertices=surface_mesh.vertices.copy(),
             faces=surface_mesh.faces.copy(),
@@ -361,8 +399,12 @@ def cut_cylinder_with_surface(
 
     extrusion, back_perimeter_edges = _extrude_loops(clip_loops, back_origin, d)
     combined = trimesh.util.concatenate([surface_mesh, extrusion])
-    result = trimesh.Trimesh(vertices=combined.vertices, faces=combined.faces, process=True)
-    trimesh.repair.fix_normals(result)
-    print(f"[door/cyl] final: {len(result.vertices)} verts, {len(result.faces)} faces  "
-          f"watertight={result.is_watertight}")
+    result = trimesh.Trimesh(
+        vertices=combined.vertices, faces=combined.faces, process=True
+    )
+    trimesh.repair.fix_normals(result)  # type: ignore[no-untyped-call]
+    _log.debug(
+        f"[door/cyl] final: {len(result.vertices)} verts, {len(result.faces)} faces  "
+        f"watertight={result.is_watertight}"
+    )
     return result, back_perimeter_edges

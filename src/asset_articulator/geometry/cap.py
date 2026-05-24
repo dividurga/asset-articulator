@@ -1,19 +1,25 @@
-"""This file creates a cap geometry for any sliced stl"""
+"""This file creates a cap geometry for any sliced stl."""
 
 from pathlib import Path
 from typing import Any
-import trimesh
-import numpy as np
+
 import networkx as nx
+import numpy as np
+import trimesh
 
 
 class Cap:
-    def __init__(self, mesh_path: Path, selection_metadata: dict[str, Any] | None = None):
+    """Cap geometry builder — fills boundary holes on sliced meshes."""
+
+    def __init__(
+        self, mesh_path: Path, selection_metadata: dict[str, Any] | None = None
+    ):
         self.mesh_path = mesh_path
         self.selection_metadata = selection_metadata
 
     def _drop_tiny_components(self, mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-        """Remove tiny disconnected sliver components that destabilize boundary detection."""
+        """Remove tiny disconnected sliver components that destabilize boundary
+        detection."""
         if len(mesh.faces) == 0:
             return mesh
 
@@ -21,10 +27,16 @@ class Cap:
         if len(components) <= 1:
             return mesh
 
-        face_counts = np.asarray([len(comp.faces) for comp in components], dtype=np.int64)
+        face_counts = np.asarray(
+            [len(comp.faces) for comp in components], dtype=np.int64
+        )
         largest = int(np.max(face_counts))
         min_faces_to_keep = max(4, int(np.ceil(largest * 1e-5)))
-        keep = [comp for comp, n_faces in zip(components, face_counts) if int(n_faces) >= min_faces_to_keep]
+        keep = [
+            comp
+            for comp, n_faces in zip(components, face_counts)
+            if int(n_faces) >= min_faces_to_keep
+        ]
 
         if not keep:
             return mesh
@@ -110,7 +122,8 @@ class Cap:
     def _loop_score_from_selection_metadata(
         self, loop_vertices: np.ndarray, metadata: dict[str, Any]
     ) -> float:
-        """Lower score means a loop is more likely to come from the cuboid selection cut."""
+        """Lower score means a loop is more likely to come from the cuboid selection
+        cut."""
         if not {"center", "rotation", "extents"}.issubset(metadata.keys()):
             return float("inf")
 
@@ -124,7 +137,8 @@ class Cap:
         return float(np.median(point_distance))
 
     def select_boundary_loop(self, mesh: trimesh.Trimesh) -> np.ndarray | None:
-        """Select one boundary loop; uses metadata if available, otherwise the longest loop."""
+        """Select one boundary loop; uses metadata if available, otherwise the longest
+        loop."""
         cleaned = self._clean_mesh_for_boundary(mesh)
         loops = self.boundary_loops(mesh)
         if not loops:
@@ -136,7 +150,9 @@ class Cap:
         scored = []
         for loop in loops:
             vertices = cleaned.vertices[loop]
-            score = self._loop_score_from_selection_metadata(vertices, self.selection_metadata)
+            score = self._loop_score_from_selection_metadata(
+                vertices, self.selection_metadata
+            )
             scored.append((score, loop))
 
         scored.sort(key=lambda item: item[0])
@@ -159,7 +175,9 @@ class Cap:
         edges = self.boundary_edges(mesh)
         return cleaned.vertices[edges]
 
-    def _plane_basis_from_points(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _plane_basis_from_points(
+        self, points: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return centroid and orthonormal in-plane basis (u, v) from 3D loop points."""
         centroid = np.mean(points, axis=0)
         centered = points - centroid
@@ -176,34 +194,46 @@ class Cap:
         v = v / np.linalg.norm(v)
         return centroid, u, v
 
-    def _triangulate_loop_2d(self, loop_2d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _triangulate_loop_2d(
+        self, loop_2d: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Triangulate polygon loop in 2D; returns vertices2d and triangle faces."""
         if len(loop_2d) < 3:
             return np.empty((0, 2), dtype=float), np.empty((0, 3), dtype=np.int64)
 
         try:
-            import importlib
+            # shapely produces better triangulations for concave loops.
+            # Install with: pip install shapely
+            import importlib  # pylint: disable=import-outside-toplevel
 
             sg = importlib.import_module("shapely.geometry")
             polygon = sg.Polygon(loop_2d)
             if polygon.is_valid and polygon.area > 0.0:
-                vertices_2d, faces = trimesh.creation.triangulate_polygon(polygon)
-                return np.asarray(vertices_2d, dtype=float), np.asarray(faces, dtype=np.int64)
-        except Exception:
-            pass
+                vertices_2d, faces = trimesh.creation.triangulate_polygon(polygon)  # type: ignore[misc]
+                return np.asarray(vertices_2d, dtype=float), np.asarray(
+                    faces, dtype=np.int64
+                )
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass  # fall back to fan triangulation
 
         # Fallback: simple fan triangulation from first vertex.
-        vertices_2d = np.asarray(loop_2d, dtype=float)
-        faces = []
-        for i in range(1, len(vertices_2d) - 1):
-            faces.append([0, i, i + 1])
-        return vertices_2d, np.asarray(faces, dtype=np.int64)
+        fan_vertices_2d: np.ndarray = np.asarray(loop_2d, dtype=float)
+        fan_faces: list[list[int]] = []
+        for i in range(1, len(fan_vertices_2d) - 1):
+            fan_faces.append([0, i, i + 1])
+        return fan_vertices_2d, np.asarray(fan_faces, dtype=np.int64)
 
     def _lift_2d_to_3d(
-        self, vertices_2d: np.ndarray, centroid: np.ndarray, u: np.ndarray, v: np.ndarray
+        self,
+        vertices_2d: np.ndarray,
+        centroid: np.ndarray,
+        u: np.ndarray,
+        v: np.ndarray,
     ) -> np.ndarray:
         """Lift 2D plane coordinates back to 3D points using plane basis."""
-        return centroid + np.outer(vertices_2d[:, 0], u) + np.outer(vertices_2d[:, 1], v)
+        return (
+            centroid + np.outer(vertices_2d[:, 0], u) + np.outer(vertices_2d[:, 1], v)
+        )
 
     def cap_mesh(
         self,
@@ -229,8 +259,10 @@ class Cap:
                 return cleaned
             # Snap each loop position to the nearest vertex in the cleaned mesh.
             loop_mesh_indices = np.array(
-                [int(np.argmin(np.linalg.norm(cleaned.vertices - pt, axis=1)))
-                 for pt in loop_points],
+                [
+                    int(np.argmin(np.linalg.norm(cleaned.vertices - pt, axis=1)))
+                    for pt in loop_points
+                ],
                 dtype=np.int64,
             )
         else:
@@ -268,7 +300,7 @@ class Cap:
                 cap_vertex_to_mesh_index.append(int(loop_mesh_indices[nearest]))
             else:
                 cap_vertex_to_mesh_index.append(len(merged_vertices))
-                merged_vertices = np.vstack([merged_vertices, v3d])
+                merged_vertices = np.vstack([merged_vertices, v3d])  # type: ignore[assignment]
 
         stitched_cap_faces = np.asarray(
             [[cap_vertex_to_mesh_index[int(i)] for i in face] for face in cap_faces],
@@ -276,7 +308,9 @@ class Cap:
         )
         combined_faces = np.vstack([cleaned.faces, stitched_cap_faces])
 
-        capped = trimesh.Trimesh(vertices=merged_vertices, faces=combined_faces, process=False)
+        capped = trimesh.Trimesh(
+            vertices=merged_vertices, faces=combined_faces, process=False
+        )
         capped.remove_infinite_values()
         capped.merge_vertices()
         if hasattr(capped, "remove_duplicate_faces"):
@@ -288,11 +322,8 @@ class Cap:
         if not capped.is_watertight and hasattr(capped, "fill_holes"):
             try:
                 getattr(capped, "fill_holes")()
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 pass
 
         capped.remove_unreferenced_vertices()
         return capped
-
-
-

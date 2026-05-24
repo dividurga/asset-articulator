@@ -1,9 +1,11 @@
+"""Oriented cylinder geometry primitive for knob/dial selection."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+
 import numpy as np
 import numpy.typing as npt
-
 
 ArrayF = npt.NDArray[np.float64]
 
@@ -36,8 +38,8 @@ class OrientedCylinder:
     - origin  → cylinder center
     """
 
-    center: ArrayF      # (3,) world coords of cylinder center
-    axis: ArrayF        # (3,) unit vector along cylinder axis
+    center: ArrayF  # (3,) world coords of cylinder center
+    axis: ArrayF  # (3,) unit vector along cylinder axis
     radius: float
     half_height: float  # half the total cylinder height
 
@@ -51,6 +53,8 @@ class OrientedCylinder:
             raise ValueError("Cylinder radius must be positive.")
         if self.half_height <= 0.0:
             raise ValueError("Cylinder half_height must be positive.")
+        # _basis is intentionally set in __post_init__ (dataclass pattern).
+        # pylint: disable-next=attribute-defined-outside-init
         self._basis: ArrayF = _build_basis(self.axis)
 
     def world_to_local(self, points_world: ArrayF) -> ArrayF:
@@ -63,8 +67,12 @@ class OrientedCylinder:
         pts = np.asarray(points_local, dtype=float)
         return pts @ self._basis.T + self.center
 
-    def contains(self, points_world: ArrayF, tol: float = 1e-6) -> npt.NDArray[np.bool_]:
+    def contains(
+        self, points_world: ArrayF, tol: float = 1e-6
+    ) -> npt.NDArray[np.bool_]:
         """Return boolean mask of points strictly inside the cylinder."""
         local = self.world_to_local(np.asarray(points_world, dtype=float))
         r2 = local[:, 0] ** 2 + local[:, 1] ** 2
-        return (r2 < (self.radius - tol) ** 2) & (np.abs(local[:, 2]) < self.half_height - tol)
+        return (r2 < (self.radius - tol) ** 2) & (
+            np.abs(local[:, 2]) < self.half_height - tol
+        )

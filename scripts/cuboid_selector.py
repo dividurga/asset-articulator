@@ -1,33 +1,53 @@
+"""Interactive GUI for annotating articulated joints on 3-D mesh assets."""
+
+# pylint: disable=missing-function-docstring,missing-class-docstring,broad-exception-caught,unused-argument,attribute-defined-outside-init
 from __future__ import annotations
 
-import sys
 import itertools
-from pathlib import Path
+import sys
 from dataclasses import dataclass
+from pathlib import Path
+
 import numpy as np
 import pyvista as pv
 import pyvistaqt
 import trimesh
-
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QGroupBox, QLabel, QSlider, QDoubleSpinBox, QPushButton, QScrollArea,
-    QCheckBox, QRadioButton, QButtonGroup,
-)
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QDoubleSpinBox,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
 
 from asset_articulator.assets.joints import JointLimits
-from asset_articulator.geometry.clip import split_mesh_by_cuboid_clip, split_mesh_by_cylinder_clip
+from asset_articulator.geometry.clip import (
+    split_mesh_by_cuboid_clip,
+    split_mesh_by_cylinder_clip,
+)
 from asset_articulator.geometry.cuboid import OrientedCuboid
 from asset_articulator.geometry.cylinder import OrientedCylinder
+from asset_articulator.geometry.door import (
+    cut_cuboid_with_surface,
+    cut_cylinder_with_surface,
+)
 from asset_articulator.geometry.edge import Edge
-from asset_articulator.geometry.door import cut_cuboid_with_surface, cut_cylinder_with_surface
 from asset_articulator.io.urdf_export import ArticulationSpec, export_to_urdf
-
 
 # ---------------------------------------------------------------------------
 # Math helpers
 # ---------------------------------------------------------------------------
+
 
 def normalize(vec: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(vec)
@@ -41,23 +61,28 @@ def rotation_matrix(axis: np.ndarray, angle_rad: float) -> np.ndarray:
     axis = normalize(axis)
     x, y, z = axis
     c, s, C = np.cos(angle_rad), np.sin(angle_rad), 1.0 - np.cos(angle_rad)
-    return np.array([
-        [c + x*x*C,   x*y*C - z*s, x*z*C + y*s],
-        [y*x*C + z*s, c + y*y*C,   y*z*C - x*s],
-        [z*x*C - y*s, z*y*C + x*s, c + z*z*C  ],
-    ], dtype=float)
+    return np.array(
+        [
+            [c + x * x * C, x * y * C - z * s, x * z * C + y * s],
+            [y * x * C + z * s, c + y * y * C, y * z * C - x * s],
+            [z * x * C - y * s, z * y * C + x * s, c + z * z * C],
+        ],
+        dtype=float,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Reusable slider + spinbox widget
 # ---------------------------------------------------------------------------
 
+
 class SliderSpinBox(QWidget):
     """Labeled QSlider + QDoubleSpinBox that stay in sync.
 
-    Emits valueChanged(float) whenever the value changes from either widget.
-    set_value() does NOT emit (use it for programmatic resets).
+    Emits valueChanged(float) whenever the value changes from either widget. set_value()
+    does NOT emit (use it for programmatic resets).
     """
+
     valueChanged = pyqtSignal(float)
 
     def __init__(
@@ -151,6 +176,7 @@ class SliderSpinBox(QWidget):
 # Data
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class FaceSelection:
     p0_uv: np.ndarray | None = None
@@ -160,19 +186,21 @@ class FaceSelection:
 @dataclass
 class ArticulationEntry:
     """One completed door/slider selection ready for URDF export."""
+
     edge: Edge
     joint_type: str
     joint_limits: JointLimits
-    door_mesh: trimesh.Trimesh   # in hinge-local frame (shifted by -hinge_origin)
-    hinge_origin: np.ndarray     # world coords of joint origin
+    door_mesh: trimesh.Trimesh  # in hinge-local frame (shifted by -hinge_origin)
+    hinge_origin: np.ndarray  # world coords of joint origin
     cuboid: OrientedCuboid | None = None
     cylinder: OrientedCylinder | None = None
-    box_actor: object = None     # pyvista actor for this door's wireframe
+    box_actor: object = None  # pyvista actor for this door's wireframe
 
 
 # ---------------------------------------------------------------------------
 # Main application
 # ---------------------------------------------------------------------------
+
 
 class CuboidSelectorApp(QMainWindow):
     def __init__(self, mesh_path: str | Path) -> None:
@@ -198,11 +226,14 @@ class CuboidSelectorApp(QMainWindow):
         self.pitch_deg = 0.0
         self.roll_deg = 0.0
         self.plane_offset = 0.0
-        self.plane_origin_base = np.array([
-            self.scene_center[0],
-            self.bounds_max[1] - 0.02 * self.scene_extents[1],
-            self.scene_center[2],
-        ], dtype=float)
+        self.plane_origin_base = np.array(
+            [
+                self.scene_center[0],
+                self.bounds_max[1] - 0.02 * self.scene_extents[1],
+                self.scene_center[2],
+            ],
+            dtype=float,
+        )
         self.plane_u, self.plane_v = self._compute_plane_axes(0.0, 0.0, 0.0)
         self.plane_origin = self.plane_origin_base.copy()
         self.plane_size_u = max(1e-3, 1.5 * float(self.scene_extents[0]))
@@ -223,9 +254,13 @@ class CuboidSelectorApp(QMainWindow):
         self._cyl_radius: float = 0.0
 
         # Cabinet mode state -----------------------------------------------
-        self._cab_split_u: float | None = None   # split coord when axis == "u" (vertical split)
-        self._cab_split_v: float | None = None   # split coord when axis == "v" (horizontal split)
-        self._cab_split_axis: str = "u"          # "u" = vertical split, "v" = horizontal split
+        self._cab_split_u: float | None = (
+            None  # split coord when axis == "u" (vertical split)
+        )
+        self._cab_split_v: float | None = (
+            None  # split coord when axis == "v" (horizontal split)
+        )
+        self._cab_split_axis: str = "u"  # "u" = vertical split, "v" = horizontal split
         self._cab_snap_pt_uv: np.ndarray | None = None  # edge snap point in plane UV
         self._cab_left_cuboid: OrientedCuboid | None = None
         self._cab_right_cuboid: OrientedCuboid | None = None
@@ -233,14 +268,16 @@ class CuboidSelectorApp(QMainWindow):
         self._cab_right_edge: Edge | None = None
         self._cab_left_limits: JointLimits | None = None
         self._cab_right_limits: JointLimits | None = None
-        self._cab_state: str = "face"   # "face" | "split" | "hinge"
-        self._cab_hinge_target: str | None = None       # "left" | "right"
+        self._cab_state: str = "face"  # "face" | "split" | "hinge"
+        self._cab_hinge_target: str | None = None  # "left" | "right"
         self._cab_split_actor = None
         self._cab_snap_pt_actor = None
         self._cab_left_box_actor = None
         self._cab_right_box_actor = None
         self._cab_left_edge_actor = None
         self._cab_right_edge_actor = None
+        self._cab_left_joint_type: str = "revolute"
+        self._cab_right_joint_type: str = "revolute"
 
         # Joint state ------------------------------------------------------
         self._joint_armed: str | None = None  # "revolute" | "prismatic" | None
@@ -395,18 +432,30 @@ class CuboidSelectorApp(QMainWindow):
         cuboid_lay = QVBoxLayout(cuboid_grp)
 
         self._w_depth = SliderSpinBox("Depth", 1e-3, 3 * d, self.depth, decimals=4)
-        self._w_size_u = SliderSpinBox("Width (U extent)", 1e-4, 3 * d, 0.1 * d, decimals=4)
-        self._w_size_v = SliderSpinBox("Height (V extent)", 1e-4, 3 * d, 0.1 * d, decimals=4)
+        self._w_size_u = SliderSpinBox(
+            "Width (U extent)", 1e-4, 3 * d, 0.1 * d, decimals=4
+        )
+        self._w_size_v = SliderSpinBox(
+            "Height (V extent)", 1e-4, 3 * d, 0.1 * d, decimals=4
+        )
         self._w_face_u = SliderSpinBox("Face offset U", -2 * d, 2 * d, 0.0, decimals=4)
         self._w_face_v = SliderSpinBox("Face offset V", -2 * d, 2 * d, 0.0, decimals=4)
-        for w in (self._w_depth, self._w_size_u, self._w_size_v, self._w_face_u, self._w_face_v):
+        for w in (
+            self._w_depth,
+            self._w_size_u,
+            self._w_size_v,
+            self._w_face_u,
+            self._w_face_v,
+        ):
             cuboid_lay.addWidget(w)
 
         btn_flip = QPushButton("Flip Extrusion Direction")
         btn_flip.clicked.connect(self._flip_extrusion_direction)
         cuboid_lay.addWidget(btn_flip)
 
-        self._chk_drawer = QCheckBox("Drawer (prismatic → box mesh; open face from edge click)")
+        self._chk_drawer = QCheckBox(
+            "Drawer (prismatic → box mesh; open face from edge click)"
+        )
         cuboid_lay.addWidget(self._chk_drawer)
         pl.addWidget(cuboid_grp)
 
@@ -420,7 +469,7 @@ class CuboidSelectorApp(QMainWindow):
         self._lbl_limits_unit = QLabel("Set limits, then click a joint button below.")
         self._lbl_limits_unit.setWordWrap(True)
         self._w_lower = SliderSpinBox("Lower limit", -360.0, 360.0, -90.0, decimals=3)
-        self._w_upper = SliderSpinBox("Upper limit", -360.0, 360.0,  90.0, decimals=3)
+        self._w_upper = SliderSpinBox("Upper limit", -360.0, 360.0, 90.0, decimals=3)
         limits_lay.addWidget(self._lbl_limits_unit)
         limits_lay.addWidget(self._w_lower)
         limits_lay.addWidget(self._w_upper)
@@ -451,10 +500,10 @@ class CuboidSelectorApp(QMainWindow):
         actions_lay = QVBoxLayout(actions_grp)
         btn_reset = QPushButton("Reset Face Selection")
         self._btn_add_door = QPushButton("Add Door / Drawer")
-        self._btn_add_cyl  = QPushButton("Add Cylinder")
-        btn_clear  = QPushButton("Clear All Selections")
-        btn_urdf   = QPushButton("Export URDF")
-        btn_print  = QPushButton("Print Cuboid Info")
+        self._btn_add_cyl = QPushButton("Add Cylinder")
+        btn_clear = QPushButton("Clear All Selections")
+        btn_urdf = QPushButton("Export URDF")
+        btn_print = QPushButton("Print Cuboid Info")
         btn_reset.clicked.connect(self._reset_face)
         self._btn_add_door.clicked.connect(self._add_door)
         self._btn_add_cyl.clicked.connect(self._add_cylinder)
@@ -464,8 +513,14 @@ class CuboidSelectorApp(QMainWindow):
         btn_print.clicked.connect(self._print_current_cuboid)
         self._chk_slice_only = QCheckBox("Slice only (export single combined mesh)")
         self._lbl_doors = QLabel("Doors queued: 0")
-        for b in (btn_reset, self._btn_add_door, self._btn_add_cyl,
-                  btn_clear, btn_urdf, btn_print):
+        for b in (
+            btn_reset,
+            self._btn_add_door,
+            self._btn_add_cyl,
+            btn_clear,
+            btn_urdf,
+            btn_print,
+        ):
             actions_lay.addWidget(b)
         actions_lay.addWidget(self._chk_slice_only)
         actions_lay.addWidget(self._lbl_doors)
@@ -537,14 +592,22 @@ class CuboidSelectorApp(QMainWindow):
     # -----------------------------------------------------------------------
 
     def _build_scene(self) -> None:
-        self._xray_on = False
+        self._xray_on: bool = False  # pylint: disable=attribute-defined-outside-init
         self.mesh_actor = self.plotter.add_mesh(
-            self.mesh_pv, color="lightgray", opacity=1.0,
-            show_edges=False, name="object_mesh", pickable=True,
+            self.mesh_pv,
+            color="lightgray",
+            opacity=1.0,
+            show_edges=False,
+            name="object_mesh",
+            pickable=True,
         )
         self._wire_actor = self.plotter.add_mesh(
-            self.mesh_pv, color="#555555", style="wireframe",
-            line_width=0.5, name="object_wire", pickable=False,
+            self.mesh_pv,
+            color="#555555",
+            style="wireframe",
+            line_width=0.5,
+            name="object_wire",
+            pickable=False,
         )
         self._wire_actor.SetVisibility(False)
 
@@ -584,7 +647,9 @@ class CuboidSelectorApp(QMainWindow):
         self.yaw_deg = self._w_yaw.value()
         self.pitch_deg = self._w_pitch.value()
         self.roll_deg = self._w_roll.value()
-        self.plane_u, self.plane_v = self._compute_plane_axes(self.yaw_deg, self.pitch_deg, self.roll_deg)
+        self.plane_u, self.plane_v = self._compute_plane_axes(
+            self.yaw_deg, self.pitch_deg, self.roll_deg
+        )
         self.plane_origin = self.plane_origin_base + self.plane_offset * self.plane_n
         self._update_plane()
 
@@ -599,7 +664,9 @@ class CuboidSelectorApp(QMainWindow):
             self._update_cuboid_preview()
         self.plotter.render()
         if had_joint:
-            self._set_status("[warn] Depth changed — joint/edge selection cleared. Reselect.")
+            self._set_status(
+                "[warn] Depth changed — joint/edge selection cleared. Reselect."
+            )
 
     def _on_face_offset_changed(self, _=None) -> None:
         self.face_offset_u = self._w_face_u.value()
@@ -615,7 +682,9 @@ class CuboidSelectorApp(QMainWindow):
             self._update_cuboid_preview()
         self.plotter.render()
         if had_joint:
-            self._set_status("[warn] Face moved — joint/edge selection cleared. Reselect.")
+            self._set_status(
+                "[warn] Face moved — joint/edge selection cleared. Reselect."
+            )
 
     def _on_face_size_changed(self, _=None) -> None:
         if self._selection_mode == "cylinder":
@@ -640,7 +709,9 @@ class CuboidSelectorApp(QMainWindow):
             self._update_cuboid_preview()
         self.plotter.render()
         if had_joint:
-            self._set_status("[warn] Face resized — joint/edge selection cleared. Reselect.")
+            self._set_status(
+                "[warn] Face resized — joint/edge selection cleared. Reselect."
+            )
 
     # -----------------------------------------------------------------------
     # Plane / face rendering
@@ -649,22 +720,29 @@ class CuboidSelectorApp(QMainWindow):
     def _make_plane_mesh(self) -> pv.PolyData:
         # Project all 8 AABB corners onto current plane axes so the visual
         # always covers the full mesh regardless of plane orientation.
-        bbox_corners = np.array(list(itertools.product(
-            [self.bounds_min[0], self.bounds_max[0]],
-            [self.bounds_min[1], self.bounds_max[1]],
-            [self.bounds_min[2], self.bounds_max[2]],
-        )))
+        bbox_corners = np.array(
+            list(
+                itertools.product(
+                    [self.bounds_min[0], self.bounds_max[0]],
+                    [self.bounds_min[1], self.bounds_max[1]],
+                    [self.bounds_min[2], self.bounds_max[2]],
+                )
+            )
+        )
         proj_u = (bbox_corners - self.plane_origin) @ self.plane_u
         proj_v = (bbox_corners - self.plane_origin) @ self.plane_v
         margin = 0.05 * self.scene_diag
         hu = max(abs(proj_u).max() + margin, 1e-3)
         hv = max(abs(proj_v).max() + margin, 1e-3)
-        corners = np.array([
-            self.plane_origin - hu*self.plane_u - hv*self.plane_v,
-            self.plane_origin + hu*self.plane_u - hv*self.plane_v,
-            self.plane_origin + hu*self.plane_u + hv*self.plane_v,
-            self.plane_origin - hu*self.plane_u + hv*self.plane_v,
-        ], dtype=float)
+        corners = np.array(
+            [
+                self.plane_origin - hu * self.plane_u - hv * self.plane_v,
+                self.plane_origin + hu * self.plane_u - hv * self.plane_v,
+                self.plane_origin + hu * self.plane_u + hv * self.plane_v,
+                self.plane_origin - hu * self.plane_u + hv * self.plane_v,
+            ],
+            dtype=float,
+        )
         return pv.PolyData(corners, np.hstack([[4, 0, 1, 2, 3]]))
 
     def _update_plane(self) -> None:
@@ -672,8 +750,12 @@ class CuboidSelectorApp(QMainWindow):
             self.plotter.remove_actor(self.plane_actor)
         self.plane_actor = self.plotter.add_mesh(
             self._make_plane_mesh(),
-            color="deepskyblue", opacity=0.25, show_edges=True,
-            name="construction_plane", pickable=True, reset_camera=False,
+            color="deepskyblue",
+            opacity=0.25,
+            show_edges=True,
+            name="construction_plane",
+            pickable=True,
+            reset_camera=False,
         )
         if self._selection_mode == "cylinder":
             self._update_cylinder_preview()
@@ -702,11 +784,18 @@ class CuboidSelectorApp(QMainWindow):
             return
 
         corners_uv = [[umin, vmin], [umax, vmin], [umax, vmax], [umin, vmax]]
-        corners_world = np.array([self._plane_uv_to_world(np.array(uv)) for uv in corners_uv])
+        corners_world = np.array(
+            [self._plane_uv_to_world(np.array(uv)) for uv in corners_uv]
+        )
         quad = pv.PolyData(corners_world, np.hstack([[4, 0, 1, 2, 3]]))
         self.face_actor = self.plotter.add_mesh(
-            quad, color="orange", opacity=0.45, show_edges=True,
-            line_width=3, name="face_preview", reset_camera=False,
+            quad,
+            color="orange",
+            opacity=0.45,
+            show_edges=True,
+            line_width=3,
+            name="face_preview",
+            reset_camera=False,
         )
 
     def _update_cuboid_preview(self) -> None:
@@ -751,18 +840,34 @@ class CuboidSelectorApp(QMainWindow):
             extents=np.array([half_u, half_v, half_n], dtype=float),
         )
 
-        corners_local = np.array([
-            [-half_u, -half_v, -half_n], [ half_u, -half_v, -half_n],
-            [ half_u,  half_v, -half_n], [-half_u,  half_v, -half_n],
-            [-half_u, -half_v,  half_n], [ half_u, -half_v,  half_n],
-            [ half_u,  half_v,  half_n], [-half_u,  half_v,  half_n],
-        ], dtype=float)
+        corners_local = np.array(
+            [
+                [-half_u, -half_v, -half_n],
+                [half_u, -half_v, -half_n],
+                [half_u, half_v, -half_n],
+                [-half_u, half_v, -half_n],
+                [-half_u, -half_v, half_n],
+                [half_u, -half_v, half_n],
+                [half_u, half_v, half_n],
+                [-half_u, half_v, half_n],
+            ],
+            dtype=float,
+        )
         corners_world = self.current_cuboid.local_to_world(corners_local)
 
         edge_pairs = [
-            (0, 1), (1, 2), (2, 3), (3, 0),
-            (4, 5), (5, 6), (6, 7), (7, 4),
-            (0, 4), (1, 5), (2, 6), (3, 7),
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
         ]
         line_cells: list[int] = []
         for a, b in edge_pairs:
@@ -771,7 +876,9 @@ class CuboidSelectorApp(QMainWindow):
         wire = pv.PolyData()
         wire.points = corners_world
         wire.lines = np.array(line_cells, dtype=np.int32)
-        self.box_actor = self.plotter.add_mesh(wire, color="red", line_width=3, name="cuboid_preview", reset_camera=False)
+        self.box_actor = self.plotter.add_mesh(
+            wire, color="red", line_width=3, name="cuboid_preview", reset_camera=False
+        )
 
     # -----------------------------------------------------------------------
     # Pick callback
@@ -793,9 +900,13 @@ class CuboidSelectorApp(QMainWindow):
                         self._set_status("[warn] Perimeter point too close to center.")
                         return
                     self._cyl_radius = r
-                    self._set_status("Cylinder defined. Click 'Select Axis (Continuous)' or reset.")
+                    self._set_status(
+                        "Cylinder defined. Click 'Select Axis (Continuous)' or reset."
+                    )
                 else:
-                    self._set_status("Cylinder already set. Use offset sliders or reset.")
+                    self._set_status(
+                        "Cylinder already set. Use offset sliders or reset."
+                    )
                     return
                 self._update_cylinder_preview()
                 self.plotter.render()
@@ -815,13 +926,17 @@ class CuboidSelectorApp(QMainWindow):
                 size_v = abs(uv[1] - self.face.p0_uv[1])
                 self._w_size_u.set_value(size_u)
                 self._w_size_v.set_value(size_v)
-                self._set_status("Face defined. Click a joint button then click near an edge.")
+                self._set_status(
+                    "Face defined. Click a joint button then click near an edge."
+                )
             else:
                 if self._joint_armed is not None and self.current_cuboid is not None:
                     self._choose_edge_joint(self._joint_armed)
                     self._joint_armed = None
                 else:
-                    self._set_status("Face already set. Use offset sliders to fine-tune, or reset.")
+                    self._set_status(
+                        "Face already set. Use offset sliders to fine-tune, or reset."
+                    )
                 return
 
             self._update_face_preview()
@@ -843,10 +958,16 @@ class CuboidSelectorApp(QMainWindow):
                 self._w_size_v.set_value(abs(uv[1] - self.face.p0_uv[1]))
                 self._cab_state = "split"
                 self._btn_cab_resplit.setEnabled(True)
-                self._lbl_cab_step.setText("Step 2: Click on a face edge to set split line.")
-                self._set_status("Cabinet: face defined — click on top/bottom edge for vertical split, left/right for horizontal.")
+                self._lbl_cab_step.setText(
+                    "Step 2: Click on a face edge to set split line."
+                )
+                self._set_status(
+                    "Cabinet: face defined — click top/bottom edge for vertical split, left/right for horizontal."
+                )
             else:
-                self._set_status("Cabinet: face already set. Use sliders or Reset Face.")
+                self._set_status(
+                    "Cabinet: face already set. Use sliders or Reset Face."
+                )
                 return
             self._update_face_preview()
             self._update_cabinet_preview()
@@ -865,11 +986,14 @@ class CuboidSelectorApp(QMainWindow):
             # Snap click to the nearest face edge, then project onto it.
             # Nearest edge determines whether the split is vertical (top/bottom edge clicked)
             # or horizontal (left/right edge clicked).
-            d_left   = abs(u - umin)
-            d_right  = abs(u - umax)
+            d_left = abs(u - umin)
+            d_right = abs(u - umax)
             d_bottom = abs(v - vmin)
-            d_top    = abs(v - vmax)
-            nearest  = min(d_left, d_right, d_bottom, d_top)
+            d_top = abs(v - vmax)
+            nearest = min(d_left, d_right, d_bottom, d_top)
+
+            is_drawer = self._chk_drawer.isChecked()
+            joint_word = "Edge" if is_drawer else "Hinge"
 
             if nearest in (d_bottom, d_top):
                 # Click was on top or bottom edge → vertical split line drops across face
@@ -878,8 +1002,8 @@ class CuboidSelectorApp(QMainWindow):
                 self._cab_split_v = None
                 snap_v = vmin if nearest == d_bottom else vmax
                 self._cab_snap_pt_uv = np.array([self._cab_split_u, snap_v])
-                self._btn_cab_left.setText("Select Left Hinge")
-                self._btn_cab_right.setText("Select Right Hinge")
+                self._btn_cab_left.setText(f"Select Left {joint_word}")
+                self._btn_cab_right.setText(f"Select Right {joint_word}")
             else:
                 # Click was on left or right edge → horizontal split line runs across face
                 self._cab_split_axis = "v"
@@ -887,8 +1011,8 @@ class CuboidSelectorApp(QMainWindow):
                 self._cab_split_u = None
                 snap_u = umin if nearest == d_left else umax
                 self._cab_snap_pt_uv = np.array([snap_u, self._cab_split_v])
-                self._btn_cab_left.setText("Select Bottom Hinge")
-                self._btn_cab_right.setText("Select Top Hinge")
+                self._btn_cab_left.setText(f"Select Bottom {joint_word}")
+                self._btn_cab_right.setText(f"Select Top {joint_word}")
 
             self._cab_state = "hinge"
             self._btn_cab_left.setEnabled(True)
@@ -896,8 +1020,13 @@ class CuboidSelectorApp(QMainWindow):
             self._update_cabinet_preview()
             self.plotter.render()
             axis_str = "vertical" if self._cab_split_axis == "u" else "horizontal"
-            self._lbl_cab_step.setText("Step 3: Select the two hinge edges, then 'Add Cabinet'.")
-            self._set_status(f"Cabinet: {axis_str} split set. Select hinges (orange / cyan).")
+            step_word = "slider edges" if is_drawer else "hinge edges"
+            self._lbl_cab_step.setText(
+                f"Step 3: Select the two {step_word}, then 'Add Cabinet'."
+            )
+            self._set_status(
+                f"Cabinet: {axis_str} split set. Select {step_word} (orange / cyan)."
+            )
 
         elif self._cab_state == "hinge" and self._cab_hinge_target is not None:
             self._pick_cabinet_edge(self._cab_hinge_target)
@@ -917,29 +1046,56 @@ class CuboidSelectorApp(QMainWindow):
 
     def _draw_cuboid_wire(self, cuboid: OrientedCuboid, color: str, name: str):
         half_u, half_v, half_n = cuboid.extents
-        corners_local = np.array([
-            [-half_u, -half_v, -half_n], [ half_u, -half_v, -half_n],
-            [ half_u,  half_v, -half_n], [-half_u,  half_v, -half_n],
-            [-half_u, -half_v,  half_n], [ half_u, -half_v,  half_n],
-            [ half_u,  half_v,  half_n], [-half_u,  half_v,  half_n],
-        ], dtype=float)
+        corners_local = np.array(
+            [
+                [-half_u, -half_v, -half_n],
+                [half_u, -half_v, -half_n],
+                [half_u, half_v, -half_n],
+                [-half_u, half_v, -half_n],
+                [-half_u, -half_v, half_n],
+                [half_u, -half_v, half_n],
+                [half_u, half_v, half_n],
+                [-half_u, half_v, half_n],
+            ],
+            dtype=float,
+        )
         corners_world = cuboid.local_to_world(corners_local)
-        edge_pairs = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+        edge_pairs = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        ]
         lines: list[int] = []
         for a, b in edge_pairs:
             lines.extend([2, a, b])
         wire = pv.PolyData()
         wire.points = corners_world
         wire.lines = np.array(lines, dtype=np.int32)
-        return self.plotter.add_mesh(wire, color=color, line_width=3, name=name, reset_camera=False)
+        return self.plotter.add_mesh(
+            wire, color=color, line_width=3, name=name, reset_camera=False
+        )
 
     # -----------------------------------------------------------------------
     # Cabinet helpers
     # -----------------------------------------------------------------------
 
     def _update_cabinet_preview(self) -> None:
-        for attr in ("_cab_split_actor", "_cab_snap_pt_actor", "_cab_left_box_actor",
-                     "_cab_right_box_actor", "box_actor"):
+        for attr in (
+            "_cab_split_actor",
+            "_cab_snap_pt_actor",
+            "_cab_left_box_actor",
+            "_cab_right_box_actor",
+            "box_actor",
+        ):
             actor = getattr(self, attr)
             if actor is not None:
                 self.plotter.remove_actor(actor)
@@ -965,15 +1121,19 @@ class CuboidSelectorApp(QMainWindow):
         u_center = 0.5 * (umin + umax)
         v_center = 0.5 * (vmin + vmax)
 
-        has_split = (self._cab_split_axis == "u" and self._cab_split_u is not None) or \
-                    (self._cab_split_axis == "v" and self._cab_split_v is not None)
+        has_split = (self._cab_split_axis == "u" and self._cab_split_u is not None) or (
+            self._cab_split_axis == "v" and self._cab_split_v is not None
+        )
 
         if not has_split:
             # Unsplit outline while waiting for edge click
             outline = OrientedCuboid(
-                center=self._plane_uv_to_world(np.array([u_center, v_center])) + self.extrude_sign * half_n * n,
+                center=self._plane_uv_to_world(np.array([u_center, v_center]))
+                + self.extrude_sign * half_n * n,
                 rotation=np.column_stack([self.plane_u, self.plane_v, n]),
-                extents=np.array([0.5 * (umax - umin), 0.5 * (vmax - vmin), half_n], dtype=float),
+                extents=np.array(
+                    [0.5 * (umax - umin), 0.5 * (vmax - vmin), half_n], dtype=float
+                ),
             )
             self.box_actor = self._draw_cuboid_wire(outline, "red", "cab_outline")
             return
@@ -983,7 +1143,9 @@ class CuboidSelectorApp(QMainWindow):
             snap_world = self._plane_uv_to_world(self._cab_snap_pt_uv)
             self._cab_snap_pt_actor = self.plotter.add_mesh(
                 pv.Sphere(radius=self.scene_diag * 0.006, center=snap_world),
-                color="white", name="cab_snap_pt", reset_camera=False,
+                color="white",
+                name="cab_snap_pt",
+                reset_camera=False,
             )
 
         if self._cab_split_axis == "u":
@@ -992,30 +1154,41 @@ class CuboidSelectorApp(QMainWindow):
             line_a = self._plane_uv_to_world(np.array([split_u, vmin]))
             line_b = self._plane_uv_to_world(np.array([split_u, vmax]))
             self._cab_split_actor = self.plotter.add_mesh(
-                pv.Line(line_a, line_b), color="white", line_width=3,
-                name="cab_split_line", reset_camera=False,
+                pv.Line(line_a, line_b),
+                color="white",
+                line_width=3,
+                name="cab_split_line",
+                reset_camera=False,
             )
             # Left sub-cuboid
             lhu = 0.5 * (split_u - umin)
             lhv = 0.5 * (vmax - vmin)
             if lhu > 1e-9:
-                lc = self._plane_uv_to_world(np.array([0.5 * (umin + split_u), v_center]))
+                lc = self._plane_uv_to_world(
+                    np.array([0.5 * (umin + split_u), v_center])
+                )
                 self._cab_left_cuboid = OrientedCuboid(
                     center=lc + self.extrude_sign * half_n * n,
                     rotation=np.column_stack([self.plane_u, self.plane_v, n]),
                     extents=np.array([lhu, lhv, half_n], dtype=float),
                 )
-                self._cab_left_box_actor = self._draw_cuboid_wire(self._cab_left_cuboid, "orange", "cab_left_box")
+                self._cab_left_box_actor = self._draw_cuboid_wire(
+                    self._cab_left_cuboid, "orange", "cab_left_box"
+                )
             # Right sub-cuboid
             rhu = 0.5 * (umax - split_u)
             if rhu > 1e-9:
-                rc = self._plane_uv_to_world(np.array([0.5 * (split_u + umax), v_center]))
+                rc = self._plane_uv_to_world(
+                    np.array([0.5 * (split_u + umax), v_center])
+                )
                 self._cab_right_cuboid = OrientedCuboid(
                     center=rc + self.extrude_sign * half_n * n,
                     rotation=np.column_stack([self.plane_u, self.plane_v, n]),
                     extents=np.array([rhu, lhv, half_n], dtype=float),
                 )
-                self._cab_right_box_actor = self._draw_cuboid_wire(self._cab_right_cuboid, "cyan", "cab_right_box")
+                self._cab_right_box_actor = self._draw_cuboid_wire(
+                    self._cab_right_cuboid, "cyan", "cab_right_box"
+                )
 
         else:  # axis == "v"
             # Horizontal split line: runs left to right at split_v
@@ -1023,30 +1196,41 @@ class CuboidSelectorApp(QMainWindow):
             line_a = self._plane_uv_to_world(np.array([umin, split_v]))
             line_b = self._plane_uv_to_world(np.array([umax, split_v]))
             self._cab_split_actor = self.plotter.add_mesh(
-                pv.Line(line_a, line_b), color="white", line_width=3,
-                name="cab_split_line", reset_camera=False,
+                pv.Line(line_a, line_b),
+                color="white",
+                line_width=3,
+                name="cab_split_line",
+                reset_camera=False,
             )
             full_hu = 0.5 * (umax - umin)
             # Bottom sub-cuboid ("left")
             bhv = 0.5 * (split_v - vmin)
             if bhv > 1e-9:
-                bc = self._plane_uv_to_world(np.array([u_center, 0.5 * (vmin + split_v)]))
+                bc = self._plane_uv_to_world(
+                    np.array([u_center, 0.5 * (vmin + split_v)])
+                )
                 self._cab_left_cuboid = OrientedCuboid(
                     center=bc + self.extrude_sign * half_n * n,
                     rotation=np.column_stack([self.plane_u, self.plane_v, n]),
                     extents=np.array([full_hu, bhv, half_n], dtype=float),
                 )
-                self._cab_left_box_actor = self._draw_cuboid_wire(self._cab_left_cuboid, "orange", "cab_left_box")
+                self._cab_left_box_actor = self._draw_cuboid_wire(
+                    self._cab_left_cuboid, "orange", "cab_left_box"
+                )
             # Top sub-cuboid ("right")
             thv = 0.5 * (vmax - split_v)
             if thv > 1e-9:
-                tc = self._plane_uv_to_world(np.array([u_center, 0.5 * (split_v + vmax)]))
+                tc = self._plane_uv_to_world(
+                    np.array([u_center, 0.5 * (split_v + vmax)])
+                )
                 self._cab_right_cuboid = OrientedCuboid(
                     center=tc + self.extrude_sign * half_n * n,
                     rotation=np.column_stack([self.plane_u, self.plane_v, n]),
                     extents=np.array([full_hu, thv, half_n], dtype=float),
                 )
-                self._cab_right_box_actor = self._draw_cuboid_wire(self._cab_right_cuboid, "cyan", "cab_right_box")
+                self._cab_right_box_actor = self._draw_cuboid_wire(
+                    self._cab_right_cuboid, "cyan", "cab_right_box"
+                )
 
     def _cab_enter_split_mode(self) -> None:
         self._cab_state = "split"
@@ -1068,8 +1252,12 @@ class CuboidSelectorApp(QMainWindow):
         self._lbl_cab_edges.setText("Left: none  |  Right: none")
         self._update_cabinet_preview()
         self.plotter.render()
-        self._lbl_cab_step.setText("Step 2: Click a point on any face edge to set split line.")
-        self._set_status("Cabinet: click on a face edge — top/bottom = vertical split, left/right = horizontal.")
+        self._lbl_cab_step.setText(
+            "Step 2: Click a point on any face edge to set split line."
+        )
+        self._set_status(
+            "Cabinet: click a face edge — top/bottom = vertical split, left/right = horizontal."
+        )
 
     def _cab_side_label(self, side: str) -> str:
         """Human label for a side, accounting for vertical vs horizontal split."""
@@ -1080,10 +1268,13 @@ class CuboidSelectorApp(QMainWindow):
     def _cab_arm_hinge(self, side: str) -> None:
         self._cab_hinge_target = side
         label = self._cab_side_label(side)
+        joint_word = "slider edge" if self._chk_drawer.isChecked() else "hinge"
         btn = self._btn_cab_left if side == "left" else self._btn_cab_right
         btn.setText(f"→ click near {label} edge…")
         self._lbl_cab_step.setText(f"Click near a {label} cuboid edge.")
-        self._set_status(f"Cabinet: click near the {label.lower()} sub-cuboid edge to set hinge.")
+        self._set_status(
+            f"Cabinet: click near {label.lower()} sub-cuboid edge to set {joint_word}."
+        )
 
     def _pick_cabinet_edge(self, side: str) -> None:
         cuboid = self._cab_left_cuboid if side == "left" else self._cab_right_cuboid
@@ -1092,14 +1283,34 @@ class CuboidSelectorApp(QMainWindow):
             return
 
         half_u, half_v, half_n = cuboid.extents
-        corners_local = np.array([
-            [-half_u, -half_v, -half_n], [ half_u, -half_v, -half_n],
-            [ half_u,  half_v, -half_n], [-half_u,  half_v, -half_n],
-            [-half_u, -half_v,  half_n], [ half_u, -half_v,  half_n],
-            [ half_u,  half_v,  half_n], [-half_u,  half_v,  half_n],
-        ], dtype=float)
+        corners_local = np.array(
+            [
+                [-half_u, -half_v, -half_n],
+                [half_u, -half_v, -half_n],
+                [half_u, half_v, -half_n],
+                [-half_u, half_v, -half_n],
+                [-half_u, -half_v, half_n],
+                [half_u, -half_v, half_n],
+                [half_u, half_v, half_n],
+                [-half_u, half_v, half_n],
+            ],
+            dtype=float,
+        )
         corners_world = cuboid.local_to_world(corners_local)
-        edge_pairs = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+        edge_pairs = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        ]
         _depth_edges = {(0, 4), (1, 5), (2, 6), (3, 7)}
         _DEPTH_BONUS = 0.35
 
@@ -1122,24 +1333,40 @@ class CuboidSelectorApp(QMainWindow):
                 best_dist = dist
                 best_ep = ep
 
-        lower_ui = self._w_lower.value()
-        upper_ui = self._w_upper.value()
-        if lower_ui >= upper_ui:
-            self._set_status("[error] Lower limit must be strictly less than upper limit.")
-            return
+        is_drawer = self._chk_drawer.isChecked()
+        joint_word = "edge" if is_drawer else "hinge"
 
-        limits = JointLimits(lower=np.deg2rad(lower_ui), upper=np.deg2rad(upper_ui), unit="rad")
-        edge = Edge(p0_world=corners_world[best_ep[0]], p1_world=corners_world[best_ep[1]])
+        if is_drawer:
+            limits = JointLimits(lower=0.0, upper=self.depth, unit="m")
+            jt = "prismatic"
+        else:
+            lower_ui = self._w_lower.value()
+            upper_ui = self._w_upper.value()
+            if lower_ui >= upper_ui:
+                self._set_status(
+                    "[error] Lower limit must be strictly less than upper limit."
+                )
+                return
+            limits = JointLimits(
+                lower=np.deg2rad(lower_ui), upper=np.deg2rad(upper_ui), unit="rad"
+            )
+            jt = "revolute"
+
+        edge = Edge(
+            p0_world=corners_world[best_ep[0]], p1_world=corners_world[best_ep[1]]
+        )
 
         if side == "left":
             self._cab_left_edge = edge
             self._cab_left_limits = limits
+            self._cab_left_joint_type = jt
             actor_attr = "_cab_left_edge_actor"
             color = "lime"
             name = "cab_left_edge"
         else:
             self._cab_right_edge = edge
             self._cab_right_limits = limits
+            self._cab_right_joint_type = jt
             actor_attr = "_cab_right_edge_actor"
             color = "yellow"
             name = "cab_right_edge"
@@ -1147,94 +1374,161 @@ class CuboidSelectorApp(QMainWindow):
         old = getattr(self, actor_attr)
         if old is not None:
             self.plotter.remove_actor(old)
-        setattr(self, actor_attr, self.plotter.add_mesh(
-            pv.Line(edge.p0_world, edge.p1_world),
-            color=color, line_width=8, name=name, reset_camera=False,
-        ))
+        setattr(
+            self,
+            actor_attr,
+            self.plotter.add_mesh(
+                pv.Line(edge.p0_world, edge.p1_world),
+                color=color,
+                line_width=8,
+                name=name,
+                reset_camera=False,
+            ),
+        )
         self.plotter.render()
 
-        # Restore button text to reflect "set, click to reselect"
         label = self._cab_side_label(side)
         btn = self._btn_cab_left if side == "left" else self._btn_cab_right
-        btn.setText(f"✓ {label} Hinge (reselect)")
+        btn.setText(f"✓ {label} {joint_word.capitalize()} (reselect)")
 
-        left_label  = self._cab_side_label("left")
+        left_label = self._cab_side_label("left")
         right_label = self._cab_side_label("right")
-        left_str  = "set" if self._cab_left_edge  is not None else "none"
+        left_str = "set" if self._cab_left_edge is not None else "none"
         right_str = "set" if self._cab_right_edge is not None else "none"
-        self._lbl_cab_edges.setText(f"{left_label}: {left_str}  |  {right_label}: {right_str}")
+        self._lbl_cab_edges.setText(
+            f"{left_label}: {left_str}  |  {right_label}: {right_str}"
+        )
 
         if self._cab_left_edge is not None and self._cab_right_edge is not None:
             self._btn_add_cabinet.setEnabled(True)
-            self._lbl_cab_step.setText("Ready — click 'Add Cabinet', or reselect a hinge above.")
-            self._set_status("Cabinet: both hinges set. Click 'Add Cabinet' or reselect a hinge.")
+            self._lbl_cab_step.setText(
+                f"Ready — click 'Add Cabinet', or reselect an {joint_word} above."
+            )
+            self._set_status(
+                f"Cabinet: both {joint_word}s set. Click 'Add Cabinet' or reselect."
+            )
         else:
             other_label = right_label if side == "left" else left_label
             other_btn = self._btn_cab_right if side == "left" else self._btn_cab_left
-            other_btn.setText(f"Select {other_label} Hinge")
-            self._set_status(f"Cabinet: {label.lower()} hinge set. Now select the {other_label.lower()} hinge.")
+            other_btn.setText(f"Select {other_label} {joint_word.capitalize()}")
+            self._set_status(
+                f"Cabinet: {label.lower()} {joint_word} set. Now select {other_label.lower()} {joint_word}."
+            )
 
     def _add_cabinet(self) -> None:
         if self._cab_left_cuboid is None or self._cab_right_cuboid is None:
             self._set_status("[warn] Cabinet cuboids not fully defined.")
             return
         if self._cab_left_edge is None or self._cab_right_edge is None:
-            self._set_status("[warn] Both hinges must be selected.")
+            self._set_status("[warn] Both edges must be selected.")
             return
 
         existing = [e.cuboid for e in self._articulations if e.cuboid is not None]
         try:
-            split_mesh_by_cuboid_clip(self.mesh_tm, self._cab_left_cuboid, existing_cuboids=existing)
             split_mesh_by_cuboid_clip(
-                self.mesh_tm, self._cab_right_cuboid,
+                self.mesh_tm, self._cab_left_cuboid, existing_cuboids=existing
+            )
+            split_mesh_by_cuboid_clip(
+                self.mesh_tm,
+                self._cab_right_cuboid,
                 existing_cuboids=existing + [self._cab_left_cuboid],
             )
         except ValueError as exc:
             self._set_status(f"[error] {exc}")
             return
 
+        is_drawer = self._chk_drawer.isChecked()
+
         try:
             res_l = split_mesh_by_cuboid_clip(self.mesh_tm, self._cab_left_cuboid)
-            left_mesh, _ = cut_cuboid_with_surface(
-                res_l.inside_mesh, self._cab_left_cuboid, clip_loops=res_l.clip_loops or None,
+            if is_drawer:
+                full_l, _ = cut_cuboid_with_surface(
+                    res_l.inside_mesh,
+                    self._cab_left_cuboid,
+                    clip_loops=res_l.clip_loops or None,
+                    extrusion_axis=2,
+                )
+                open_dir = normalize(self.extrude_sign * self.plane_n)
+                keep_l = full_l.face_normals @ open_dir < 0.7
+                left_mesh = trimesh.Trimesh(
+                    vertices=full_l.vertices,
+                    faces=full_l.faces[keep_l],
+                    process=True,
+                )
+                trimesh.repair.fix_normals(left_mesh)
+            else:
+                left_mesh, _ = cut_cuboid_with_surface(
+                    res_l.inside_mesh,
+                    self._cab_left_cuboid,
+                    clip_loops=res_l.clip_loops or None,
+                )
+            left_mesh.vertices = left_mesh.vertices - np.asarray(
+                self._cab_left_edge.p0_world
             )
-            left_mesh.vertices = left_mesh.vertices - np.asarray(self._cab_left_edge.p0_world)
 
             res_r = split_mesh_by_cuboid_clip(self.mesh_tm, self._cab_right_cuboid)
-            right_mesh, _ = cut_cuboid_with_surface(
-                res_r.inside_mesh, self._cab_right_cuboid, clip_loops=res_r.clip_loops or None,
+            if is_drawer:
+                full_r, _ = cut_cuboid_with_surface(
+                    res_r.inside_mesh,
+                    self._cab_right_cuboid,
+                    clip_loops=res_r.clip_loops or None,
+                    extrusion_axis=2,
+                )
+                keep_r = full_r.face_normals @ open_dir < 0.7
+                right_mesh = trimesh.Trimesh(
+                    vertices=full_r.vertices,
+                    faces=full_r.faces[keep_r],
+                    process=True,
+                )
+                trimesh.repair.fix_normals(right_mesh)
+            else:
+                right_mesh, _ = cut_cuboid_with_surface(
+                    res_r.inside_mesh,
+                    self._cab_right_cuboid,
+                    clip_loops=res_r.clip_loops or None,
+                )
+            right_mesh.vertices = right_mesh.vertices - np.asarray(
+                self._cab_right_edge.p0_world
             )
-            right_mesh.vertices = right_mesh.vertices - np.asarray(self._cab_right_edge.p0_world)
         except Exception as exc:
             self._set_status(f"[error] mesh split: {exc}")
             return
 
         idx = len(self._articulations)
-        left_actor = self._draw_cuboid_wire(self._cab_left_cuboid, "lime", f"door_box_{idx}")
-        self._articulations.append(ArticulationEntry(
-            edge=self._cab_left_edge,
-            joint_type="revolute",
-            joint_limits=self._cab_left_limits,
-            door_mesh=left_mesh,
-            hinge_origin=np.asarray(self._cab_left_edge.p0_world, dtype=float),
-            cuboid=self._cab_left_cuboid,
-            box_actor=left_actor,
-        ))
+        left_actor = self._draw_cuboid_wire(
+            self._cab_left_cuboid, "lime", f"door_box_{idx}"
+        )
+        self._articulations.append(
+            ArticulationEntry(
+                edge=self._cab_left_edge,
+                joint_type=self._cab_left_joint_type,
+                joint_limits=self._cab_left_limits,
+                door_mesh=left_mesh,
+                hinge_origin=np.asarray(self._cab_left_edge.p0_world, dtype=float),
+                cuboid=self._cab_left_cuboid,
+                box_actor=left_actor,
+            )
+        )
 
-        right_actor = self._draw_cuboid_wire(self._cab_right_cuboid, "lime", f"door_box_{idx + 1}")
-        self._articulations.append(ArticulationEntry(
-            edge=self._cab_right_edge,
-            joint_type="revolute",
-            joint_limits=self._cab_right_limits,
-            door_mesh=right_mesh,
-            hinge_origin=np.asarray(self._cab_right_edge.p0_world, dtype=float),
-            cuboid=self._cab_right_cuboid,
-            box_actor=right_actor,
-        ))
+        right_actor = self._draw_cuboid_wire(
+            self._cab_right_cuboid, "lime", f"door_box_{idx + 1}"
+        )
+        self._articulations.append(
+            ArticulationEntry(
+                edge=self._cab_right_edge,
+                joint_type=self._cab_right_joint_type,
+                joint_limits=self._cab_right_limits,
+                door_mesh=right_mesh,
+                hinge_origin=np.asarray(self._cab_right_edge.p0_world, dtype=float),
+                cuboid=self._cab_right_cuboid,
+                box_actor=right_actor,
+            )
+        )
 
+        kind = "drawers" if is_drawer else "doors"
         self._lbl_doors.setText(f"Doors queued: {len(self._articulations)}")
         self._set_status(
-            f"Cabinet added as doors {idx} & {idx + 1}. Reset face to add another."
+            f"Cabinet added as {kind} {idx} & {idx + 1}. Reset face to add another."
         )
         self._reset_face()
 
@@ -1249,10 +1543,19 @@ class CuboidSelectorApp(QMainWindow):
         self._cab_right_edge = None
         self._cab_left_limits = None
         self._cab_right_limits = None
+        self._cab_left_joint_type = "revolute"
+        self._cab_right_joint_type = "revolute"
         self._cab_state = "face"
         self._cab_hinge_target = None
-        for attr in ("_cab_split_actor", "_cab_snap_pt_actor", "_cab_left_box_actor",
-                     "_cab_right_box_actor", "_cab_left_edge_actor", "_cab_right_edge_actor", "box_actor"):
+        for attr in (
+            "_cab_split_actor",
+            "_cab_snap_pt_actor",
+            "_cab_left_box_actor",
+            "_cab_right_box_actor",
+            "_cab_left_edge_actor",
+            "_cab_right_edge_actor",
+            "box_actor",
+        ):
             actor = getattr(self, attr)
             if actor is not None:
                 self.plotter.remove_actor(actor)
@@ -1283,8 +1586,8 @@ class CuboidSelectorApp(QMainWindow):
         self._reset_face()
 
         cuboid_mode = mode == "cuboid"
-        cyl_mode    = mode == "cylinder"
-        cab_mode    = mode == "cabinet"
+        cyl_mode = mode == "cylinder"
+        cab_mode = mode == "cabinet"
 
         self._btn_hinge.setEnabled(cuboid_mode)
         self._btn_slider_j.setEnabled(cuboid_mode)
@@ -1306,7 +1609,9 @@ class CuboidSelectorApp(QMainWindow):
             self._w_upper.set_range(-360.0, 360.0)
             self._lbl_limits_unit.setText("Revolute: values in degrees")
             self._limits_grp.setVisible(True)
-            self._set_status("Cabinet mode: click twice to define face, then click split line.")
+            self._set_status(
+                "Cabinet mode: click twice to define face, then click split line."
+            )
 
     # -----------------------------------------------------------------------
     # Cylinder helpers
@@ -1342,7 +1647,9 @@ class CuboidSelectorApp(QMainWindow):
         if self._cyl_radius <= 1e-9:
             # Show center marker only
             sphere = pv.Sphere(radius=self.scene_diag * 0.005, center=center_world)
-            self.box_actor = self.plotter.add_mesh(sphere, color="orange", name="cyl_center", reset_camera=False)
+            self.box_actor = self.plotter.add_mesh(
+                sphere, color="orange", name="cyl_center", reset_camera=False
+            )
             return
 
         n = self.plane_n
@@ -1365,8 +1672,12 @@ class CuboidSelectorApp(QMainWindow):
             capping=True,
         )
         self.box_actor = self.plotter.add_mesh(
-            cyl_wire, color="red", style="wireframe", line_width=2,
-            name="cylinder_preview", reset_camera=False,
+            cyl_wire,
+            color="red",
+            style="wireframe",
+            line_width=2,
+            name="cylinder_preview",
+            reset_camera=False,
         )
 
     def _choose_cylinder_axis(self) -> None:
@@ -1377,7 +1688,9 @@ class CuboidSelectorApp(QMainWindow):
         lower_ui = self._w_lower.value()
         upper_ui = self._w_upper.value()
         if lower_ui >= upper_ui:
-            self._set_status("[error] Lower limit must be strictly less than upper limit.")
+            self._set_status(
+                "[error] Lower limit must be strictly less than upper limit."
+            )
             return
         lower = np.deg2rad(lower_ui)
         upper = np.deg2rad(upper_ui)
@@ -1394,10 +1707,16 @@ class CuboidSelectorApp(QMainWindow):
         if self.edge_actor is not None:
             self.plotter.remove_actor(self.edge_actor)
         self.edge_actor = self.plotter.add_mesh(
-            pv.Line(p0, p1), color="lime", line_width=8, name="edge_selection", reset_camera=False,
+            pv.Line(p0, p1),
+            color="lime",
+            line_width=8,
+            name="edge_selection",
+            reset_camera=False,
         )
         self.plotter.render()
-        self._set_status(f"Cylinder axis selected as revolute joint. Limits: {limits_str}")
+        self._set_status(
+            f"Cylinder axis selected as revolute joint. Limits: {limits_str}"
+        )
 
     def _flip_extrusion_direction(self) -> None:
         self.extrude_sign *= -1.0
@@ -1461,32 +1780,49 @@ class CuboidSelectorApp(QMainWindow):
         if self._selection_mode == "cabinet":
             self._set_status("Cabinet reset. Click twice to define a new face.")
         else:
-            self._set_status("Face reset. Click twice on the blue plane to define a new face.")
+            self._set_status(
+                "Face reset. Click twice on the blue plane to define a new face."
+            )
 
     def _choose_edge_joint(self, joint_type: str) -> None:
         if self.current_cuboid is None:
             self._set_status("[warn] No cuboid defined yet.")
             return
         if self.last_pick_world is None:
-            self._set_status("[warn] Click near a cuboid edge first, then select joint type.")
+            self._set_status(
+                "[warn] Click near a cuboid edge first, then select joint type."
+            )
             return
 
-        # Find nearest edge to last click using UV-projected distance.
-        # Depth edges (parallel to plane normal) project to a single UV point,
-        # so they're given a 0.35x bonus to make them win over face edges when
-        # clicking near a cuboid corner — which is the typical hinge location.
+        # Find nearest edge to last click using 3-D world-space distance.
         half_u, half_v, half_n = self.current_cuboid.extents
-        corners_local = np.array([
-            [-half_u, -half_v, -half_n], [ half_u, -half_v, -half_n],
-            [ half_u,  half_v, -half_n], [-half_u,  half_v, -half_n],
-            [-half_u, -half_v,  half_n], [ half_u, -half_v,  half_n],
-            [ half_u,  half_v,  half_n], [-half_u,  half_v,  half_n],
-        ], dtype=float)
+        corners_local = np.array(
+            [
+                [-half_u, -half_v, -half_n],
+                [half_u, -half_v, -half_n],
+                [half_u, half_v, -half_n],
+                [-half_u, half_v, -half_n],
+                [-half_u, -half_v, half_n],
+                [half_u, -half_v, half_n],
+                [half_u, half_v, half_n],
+                [-half_u, half_v, half_n],
+            ],
+            dtype=float,
+        )
         corners_world = self.current_cuboid.local_to_world(corners_local)
         edge_pairs = [
-            (0, 1), (1, 2), (2, 3), (3, 0),
-            (4, 5), (5, 6), (6, 7), (7, 4),
-            (0, 4), (1, 5), (2, 6), (3, 7),
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
         ]
 
         click_world = self.last_pick_world
@@ -1511,7 +1847,9 @@ class CuboidSelectorApp(QMainWindow):
         upper_ui = self._w_upper.value()
 
         if lower_ui >= upper_ui:
-            self._set_status("[error] Lower limit must be strictly less than upper limit.")
+            self._set_status(
+                "[error] Lower limit must be strictly less than upper limit."
+            )
             return
 
         if joint_type == "revolute":
@@ -1552,8 +1890,11 @@ class CuboidSelectorApp(QMainWindow):
             self.plotter.remove_actor(self.edge_actor)
         # Always show the actual selected cuboid edge in green.
         self.edge_actor = self.plotter.add_mesh(
-            pv.Line(e_p0, e_p1), color="lime", line_width=8,
-            name="edge_selection", reset_camera=False,
+            pv.Line(e_p0, e_p1),
+            color="lime",
+            line_width=8,
+            name="edge_selection",
+            reset_camera=False,
         )
         self.plotter.render()
         if joint_type == "revolute":
@@ -1582,7 +1923,9 @@ class CuboidSelectorApp(QMainWindow):
         if self._chk_drawer.isChecked():
             self._w_lower.set_value(0.0)
             self._w_upper.set_value(self.depth)
-            self._lbl_limits_unit.setText("Drawer: slide distance in meters — click near face edge to set open side")
+            self._lbl_limits_unit.setText(
+                "Drawer: slide distance in meters — click near face edge to set open side"
+            )
         else:
             self._lbl_limits_unit.setText("Prismatic: values in meters")
         self._arm_joint("prismatic")
@@ -1625,10 +1968,13 @@ class CuboidSelectorApp(QMainWindow):
                 self._set_status("[warn] Select axis joint first.")
                 return
             try:
-                result = split_mesh_by_cylinder_clip(self.mesh_tm, self.current_cylinder)
+                result = split_mesh_by_cylinder_clip(
+                    self.mesh_tm, self.current_cylinder
+                )
                 hinge = np.asarray(self.current_edge.p0_world, dtype=float)
                 door_mesh, _ = cut_cylinder_with_surface(
-                    result.inside_mesh, self.current_cylinder,
+                    result.inside_mesh,
+                    self.current_cylinder,
                     clip_loops=result.clip_loops or None,
                 )
                 door_mesh.vertices = door_mesh.vertices - hinge
@@ -1656,7 +2002,8 @@ class CuboidSelectorApp(QMainWindow):
                 # Force axis=2 (the depth/n axis) so thin_axis detection can't pick
                 # a face axis when depth > face dimensions.
                 full_mesh, _ = cut_cuboid_with_surface(
-                    result.inside_mesh, self.current_cuboid,
+                    result.inside_mesh,
+                    self.current_cuboid,
                     clip_loops=result.clip_loops or None,
                     extrusion_axis=2,
                 )
@@ -1684,7 +2031,8 @@ class CuboidSelectorApp(QMainWindow):
             result = split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid)
             hinge = np.asarray(self.current_edge.p0_world, dtype=float)
             door_mesh, _ = cut_cuboid_with_surface(
-                result.inside_mesh, self.current_cuboid,
+                result.inside_mesh,
+                self.current_cuboid,
                 clip_loops=result.clip_loops or None,
             )
             door_mesh.vertices = door_mesh.vertices - hinge
@@ -1698,7 +2046,11 @@ class CuboidSelectorApp(QMainWindow):
             if self.current_cylinder is None:
                 self._set_status("[warn] No cylinder defined yet.")
                 return
-            if self.current_edge is None or self.current_joint_type is None or self.current_joint_limits is None:
+            if (
+                self.current_edge is None
+                or self.current_joint_type is None
+                or self.current_joint_limits is None
+            ):
                 self._set_status("[warn] Select axis joint first.")
                 return
 
@@ -1706,9 +2058,15 @@ class CuboidSelectorApp(QMainWindow):
             centroids = self.mesh_tm.triangles_center
             new_inside = self.current_cylinder.contains(centroids)
             for i, e in enumerate(self._articulations):
-                other = e.cuboid.contains(centroids) if e.cuboid is not None else e.cylinder.contains(centroids)
+                other = (
+                    e.cuboid.contains(centroids)
+                    if e.cuboid is not None
+                    else e.cylinder.contains(centroids)
+                )
                 if (new_inside & other).any():
-                    self._set_status(f"[error] Cylinder overlaps existing selection {i}.")
+                    self._set_status(
+                        f"[error] Cylinder overlaps existing selection {i}."
+                    )
                     return
 
             if self._staged_child_mesh is None:
@@ -1719,12 +2077,18 @@ class CuboidSelectorApp(QMainWindow):
             cyl = self.current_cylinder
             actor = self.plotter.add_mesh(
                 pv.Cylinder(
-                    center=cyl.center, direction=cyl.axis,
-                    radius=cyl.radius, height=2 * cyl.half_height,
-                    resolution=32, capping=True,
+                    center=cyl.center,
+                    direction=cyl.axis,
+                    radius=cyl.radius,
+                    height=2 * cyl.half_height,
+                    resolution=32,
+                    capping=True,
                 ),
-                color="lime", style="wireframe", line_width=2,
-                name=f"door_cyl_{len(self._articulations)}", reset_camera=False,
+                color="lime",
+                style="wireframe",
+                line_width=2,
+                name=f"door_cyl_{len(self._articulations)}",
+                reset_camera=False,
             )
             entry = ArticulationEntry(
                 edge=self.current_edge,
@@ -1747,14 +2111,20 @@ class CuboidSelectorApp(QMainWindow):
         if self.current_cuboid is None:
             self._set_status("[warn] No cuboid defined yet.")
             return
-        if self.current_edge is None or self.current_joint_type is None or self.current_joint_limits is None:
+        if (
+            self.current_edge is None
+            or self.current_joint_type is None
+            or self.current_joint_limits is None
+        ):
             self._set_status("[warn] Select joint type and limits first.")
             return
 
         # Check for overlap with already-queued cuboids (ignore cylinder entries)
         existing = [e.cuboid for e in self._articulations if e.cuboid is not None]
         try:
-            split_mesh_by_cuboid_clip(self.mesh_tm, self.current_cuboid, existing_cuboids=existing)
+            split_mesh_by_cuboid_clip(
+                self.mesh_tm, self.current_cuboid, existing_cuboids=existing
+            )
         except ValueError as exc:
             self._set_status(f"[error] {exc}")
             return
@@ -1767,15 +2137,33 @@ class CuboidSelectorApp(QMainWindow):
 
         # Draw a persistent green wireframe for this door's cuboid
         half_u, half_v, half_n = self.current_cuboid.extents
-        corners_local = np.array([
-            [-half_u, -half_v, -half_n], [ half_u, -half_v, -half_n],
-            [ half_u,  half_v, -half_n], [-half_u,  half_v, -half_n],
-            [-half_u, -half_v,  half_n], [ half_u, -half_v,  half_n],
-            [ half_u,  half_v,  half_n], [-half_u,  half_v,  half_n],
-        ], dtype=float)
+        corners_local = np.array(
+            [
+                [-half_u, -half_v, -half_n],
+                [half_u, -half_v, -half_n],
+                [half_u, half_v, -half_n],
+                [-half_u, half_v, -half_n],
+                [-half_u, -half_v, half_n],
+                [half_u, -half_v, half_n],
+                [half_u, half_v, half_n],
+                [-half_u, half_v, half_n],
+            ],
+            dtype=float,
+        )
         corners_world = self.current_cuboid.local_to_world(corners_local)
         edge_pairs = [
-            (0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
         ]
         lines: list[int] = []
         for a, b in edge_pairs:
@@ -1784,8 +2172,11 @@ class CuboidSelectorApp(QMainWindow):
         wire.points = corners_world
         wire.lines = np.array(lines, dtype=np.int32)
         actor = self.plotter.add_mesh(
-            wire, color="lime", line_width=2,
-            name=f"door_box_{len(self._articulations)}", reset_camera=False,
+            wire,
+            color="lime",
+            line_width=2,
+            name=f"door_box_{len(self._articulations)}",
+            reset_camera=False,
         )
 
         entry = ArticulationEntry(
@@ -1799,9 +2190,11 @@ class CuboidSelectorApp(QMainWindow):
         )
         self._articulations.append(entry)
         self._lbl_doors.setText(f"Doors queued: {len(self._articulations)}")
-        kind = f"drawer (open: {self._drawer_open_face})" \
-            if (self._chk_drawer.isChecked() and self.current_joint_type == "prismatic") \
+        kind = (
+            f"drawer (open: {self._drawer_open_face})"
+            if (self._chk_drawer.isChecked() and self.current_joint_type == "prismatic")
             else "door"
+        )
         self._set_status(
             f"{kind.capitalize()} {len(self._articulations) - 1} added "
             f"({len(self._staged_child_mesh.faces)} faces). Reset face to add another."
@@ -1821,8 +2214,8 @@ class CuboidSelectorApp(QMainWindow):
         if not self._articulations:
             self._set_status("[warn] No doors queued. Add at least one door first.")
             return
-
-        export_dir = Path("data/output/urdf_test")
+        file_base_name = self.mesh_path.stem
+        export_dir = Path(f"data/output/{file_base_name}")
         export_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -1859,13 +2252,15 @@ class CuboidSelectorApp(QMainWindow):
             for i, entry in enumerate(self._articulations):
                 door_stl = export_dir / f"door_{i}.stl"
                 entry.door_mesh.export(door_stl)
-                specs.append(ArticulationSpec(
-                    child_mesh_stl=door_stl,
-                    edge=entry.edge,
-                    joint_type=entry.joint_type,
-                    joint_limits=entry.joint_limits,
-                    link_name=f"door_{i}",
-                ))
+                specs.append(
+                    ArticulationSpec(
+                        child_mesh_stl=door_stl,
+                        edge=entry.edge,
+                        joint_type=entry.joint_type,
+                        joint_limits=entry.joint_limits,
+                        link_name=f"door_{i}",
+                    )
+                )
 
             urdf_path = export_dir / f"{self.mesh_path.stem}.urdf"
             export_to_urdf(
@@ -1885,12 +2280,13 @@ class CuboidSelectorApp(QMainWindow):
     # -----------------------------------------------------------------------
 
     def _open_face_normal(self) -> np.ndarray:
-        """World-space unit normal pointing outward through the open face of the drawer."""
+        """World-space unit normal pointing outward through the open face of the
+        drawer."""
         face_map = {
-            "top":    self.plane_v,
+            "top": self.plane_v,
             "bottom": -self.plane_v,
-            "right":  self.plane_u,
-            "left":   -self.plane_u,
+            "right": self.plane_u,
+            "left": -self.plane_u,
         }
         vec = face_map.get(self._drawer_open_face, self.plane_v)
         return vec / np.linalg.norm(vec)
@@ -1916,9 +2312,15 @@ class CuboidSelectorApp(QMainWindow):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
+    """Entry point — parse CLI args and launch the interactive selector."""
+    if len(sys.argv) < 2:
+        print("Usage: python cuboid_selector.py <path/to/mesh.stl>")
+        sys.exit(1)
+    mesh_path = sys.argv[1]
     app = QApplication(sys.argv)
-    window = CuboidSelectorApp("data/input/drawer_small.stl")
+    window = CuboidSelectorApp(mesh_path)
     window.run()
     sys.exit(app.exec_())
 

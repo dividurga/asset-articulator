@@ -1,3 +1,5 @@
+"""Joint data structures used in URDF export."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,8 +9,8 @@ from dataclasses import dataclass
 class JointLimits:
     """Joint limits metadata for URDF export.
 
-    Revolute joints should store values in radians.
-    Prismatic joints should store values in meters.
+    Revolute joints should store values in radians. Prismatic joints should store values
+    in meters.
     """
 
     lower: float

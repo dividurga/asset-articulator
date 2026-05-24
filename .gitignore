@@ -166,3 +166,6 @@ cython_debug/
 data/input/170_corner_meshed.ply
 data/input/Onion-Scan-Mesh.stl
 data/input/lab_good.stl
+
+# Generated output
+data/output/

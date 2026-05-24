@@ -1,16 +1,19 @@
+"""Oriented cuboid geometry primitive for part selection."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+
 import numpy as np
 import numpy.typing as npt
-
 
 ArrayF = npt.NDArray[np.float64]
 
 
 @dataclass
 class OrientedCuboid:
-    """An oriented cuboid represented by center, local-to-world rotation, and half-extents.
+    """An oriented cuboid represented by center, local-to-world rotation, and half-
+    extents.
 
     Conventions
     -----------
@@ -42,7 +45,9 @@ class OrientedCuboid:
         points_local = np.asarray(points_local, dtype=float)
         return points_local @ self.rotation.T + self.center
 
-    def contains(self, points_world: ArrayF, tol: float = 1e-6) -> npt.NDArray[np.bool_]:
+    def contains(
+        self, points_world: ArrayF, tol: float = 1e-6
+    ) -> npt.NDArray[np.bool_]:
         """Return boolean mask of which points lie strictly inside this cuboid.
 
         Parameters
