@@ -13,10 +13,12 @@ Given a raw 3-D mesh (STL / PLY / OBJ), the tool lets you:
 
 ## Installation
 
-> Recommended: use a virtual environment.
+> Recommended: use [uv](https://docs.astral.sh/uv/) with Python 3.10.
 
 ```bash
-pip install -e ".[develop]"
+uv venv --python 3.10
+source .venv/bin/activate
+uv pip install -e ".[develop]"
 ```
 
 ---
@@ -26,7 +28,7 @@ pip install -e ".[develop]"
 ```bash
 python scripts/cuboid_selector.py path/to/your/mesh.stl
 ```
-
+Sample meshes can be found in **[docs/usage.md](docs/usage.md)**.
 The interactive window will open. Use the right-hand panel to:
 
 - Choose **Selection Mode**: Cuboid, Cylinder, or Cabinet (double-door).
