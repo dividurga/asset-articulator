@@ -1,6 +1,6 @@
 # Asset Articulator
 
-An interactive tool for annotating articulated joints on 3-D mesh assets and exporting URDF files. Built for ECE 531 at Princeton.
+An interactive tool for articulating 3-D mesh assets and exporting URDF files. 
 
 Given a raw 3-D mesh (STL / PLY / OBJ), the tool lets you:
 
