@@ -9,6 +9,7 @@ Given a raw 3-D mesh (STL / PLY / OBJ), the tool lets you:
 3. Pick a **hinge edge** (revolute) or **slider axis** (prismatic) and set joint limits.
 4. Queue multiple articulations and **export a URDF** with properly split child meshes.
 
+![Asset Articulator Full Pipeline](docs/images/aa_full_pipeline.png)
 ---
 
 ## Installation
